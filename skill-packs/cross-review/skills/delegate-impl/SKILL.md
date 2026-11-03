@@ -89,6 +89,12 @@ decide, with the user, what to commit.
 
 ## Rules
 - If in plan mode, exit plan mode first; this skill changes code through another CLI.
+- **The implementer is not sandboxed.** It runs with the same full access a reviewer gets
+  (Codex `danger-full-access`; Claude Code and agy `--dangerously-skip-permissions`), so "never
+  commit", "never push" and `SCOPE_LIMITS` are instructions it follows, not a boundary that stops
+  it. The checks above catch what a diff can show — an out-of-scope file, a new commit, a switched
+  branch — but nothing here can undo a push or a write outside the repository. Delegate only to a
+  CLI and model you trust with the machine, and keep the brief's paths narrow.
 - One delegate per set of files. For parallel tasks, one git worktree each, and say in each
   `CONTEXT` which contract (error codes, API fields, file layout) is shared, or they will diverge.
 - You own the repository's history: the implementer never commits, pushes or switches branches, and
