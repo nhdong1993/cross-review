@@ -5,10 +5,13 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { writeFakeCodex } from "./helpers/fake-codex.js";
 
 import {
   IMPLEMENT_SKILL_NAMES,
@@ -182,6 +185,98 @@ test("the implementer is told not to commit, push or leave its scope", () => {
   const compiled = fs.readFileSync(path.join(PACK, "prompts", "compiled", `${SKILL}.compiled.md`), "utf8");
   for (const rule of ["Never commit, never push", "SCOPE_LIMITS", "git add -A"]) {
     assert.ok(compiled.includes(rule), `git/scope discipline mentions ${rule}`);
+  }
+});
+
+test("the CLI reply refuses an implementation session unless it says --kind implement", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-cli-kind-"));
+  try {
+    const bin = path.join(tmp, "bin");
+    fs.mkdirSync(bin);
+    writeFakeCodex(bin);
+    const log = path.join(tmp, "calls.jsonl");
+    const env = {
+      ...process.env,
+      HOME: path.join(tmp, "home"),
+      USERPROFILE: path.join(tmp, "home"),
+      PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+      FAKE_CODEX_LOG: log,
+      FAKE_CODEX_OUTPUT: path.join(tmp, "out.md"),
+    };
+    delete env.CROSS_REVIEW_REVIEWER;
+    fs.mkdirSync(env.HOME);
+
+    // a delegate session on disk, as `begin` leaves one
+    const session = path.join(tmp, "work", ".cross-review", "sessions", "delegate-impl-20261103-001");
+    for (const d of ["outputs", "prompts", "inputs"]) fs.mkdirSync(path.join(session, d), { recursive: true });
+    fs.writeFileSync(path.join(session, "state.json"), JSON.stringify({
+      session_id: "delegate-impl-20261103-001", skill_name: SKILL, reviewer: "codex", mode: "default",
+      skills_dir: path.join(PACK, "skills"), working_dir: path.join(tmp, "work"),
+      round: 1, thread_id: "t-1", sandbox: "danger-full-access", effort: "high",
+    }));
+    const input = path.join(tmp, "reply.md");
+    fs.writeFileSync(input, "## CHANGE_REQUESTS\nDo it differently\n");
+    const before = fs.readFileSync(path.join(session, "state.json"), "utf8");
+
+    const run = args => spawnSync(process.execPath, [RUNNER, "reply", session, "--input", input, ...args], { env, encoding: "utf8" });
+
+    const refused = run([]);
+    assert.notEqual(refused.status, 0, "the review-side CLI reply must refuse");
+    assert.equal(JSON.parse(refused.stdout).code, "SESSION_KIND_MISMATCH");
+    assert.equal(fs.existsSync(log), false, "nothing was launched");
+    assert.equal(fs.readFileSync(path.join(session, "state.json"), "utf8"), before, "state untouched");
+
+    assert.notEqual(run(["--kind", "nonsense"]).status, 0, "an unknown kind is refused");
+    assert.equal(fs.existsSync(log), false);
+
+    const allowed = run(["--kind", "implement"]);
+    assert.equal(allowed.status, 0, allowed.stdout + allowed.stderr);
+    assert.equal(JSON.parse(allowed.stdout).round, 2);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("resuming a finalized session drops its stale meta.json", () => {
+  // end writes meta.json; a later reply reopens the session, and the dashboard reads meta first,
+  // so leaving it behind would keep showing the old verdict over the newer round
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-reopen-"));
+  try {
+    const bin = path.join(tmp, "bin");
+    fs.mkdirSync(bin);
+    writeFakeCodex(bin);
+    const env = {
+      ...process.env,
+      HOME: path.join(tmp, "home"),
+      USERPROFILE: path.join(tmp, "home"),
+      PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+      FAKE_CODEX_LOG: path.join(tmp, "calls.jsonl"),
+      FAKE_CODEX_OUTPUT: path.join(tmp, "out.md"),
+    };
+    delete env.CROSS_REVIEW_REVIEWER;
+    fs.mkdirSync(env.HOME);
+
+    const session = path.join(tmp, "work", ".cross-review", "sessions", "delegate-impl-20261103-002");
+    for (const d of ["outputs", "prompts", "inputs"]) fs.mkdirSync(path.join(session, d), { recursive: true });
+    fs.writeFileSync(path.join(session, "state.json"), JSON.stringify({
+      session_id: "delegate-impl-20261103-002", skill_name: SKILL, reviewer: "codex", mode: "default",
+      skills_dir: path.join(PACK, "skills"), working_dir: path.join(tmp, "work"),
+      round: 1, thread_id: "t-2", sandbox: "danger-full-access", effort: "high",
+      ended_at: 1000, end_outcome: "finalized",
+    }));
+    const meta = path.join(session, "meta.json");
+    fs.writeFileSync(meta, JSON.stringify({ verdict: "DONE" }));
+    const input = path.join(tmp, "reply.md");
+    fs.writeFileSync(input, "## CHANGE_REQUESTS\nOne more change\n");
+
+    const out = spawnSync(process.execPath, [RUNNER, "reply", session, "--input", input, "--kind", "implement"], { env, encoding: "utf8" });
+    assert.equal(out.status, 0, out.stdout + out.stderr);
+    assert.equal(fs.existsSync(meta), false, "the stale finalization is gone");
+    const state = JSON.parse(fs.readFileSync(path.join(session, "state.json"), "utf8"));
+    assert.equal(state.ended_at, null);
+    assert.equal(state.end_outcome, null);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
 

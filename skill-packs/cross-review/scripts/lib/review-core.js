@@ -449,9 +449,19 @@ export async function waitSession(sessionDir, { maxWaitSeconds = DEFAULT_MAX_WAI
  * Send the next round: render the skill's round-2+ template from the input and resume.
  * Model and effort default to the session's stored values; passing one updates the store.
  */
-export async function replySession(sessionDir, { inputText, inputFile, model, effort } = {}) {
+export async function replySession(sessionDir, { inputText, inputFile, model, effort, expectedKind = "review" } = {}) {
   const state = readState(sessionDir);
   const skill = state.skill_name;
+  // A reply resumes whatever skill the session holds, and an implement session's CLI writes files.
+  // Every caller therefore says which kind it means to drive, and the default is the safe one, so
+  // a review-side path (the MCP review_reply, the CLI `reply`) can never launch an implementer.
+  if (skillKind(skill) !== expectedKind) {
+    throw new ReviewError(
+      `This is a ${skillKind(skill)} session (skill ${skill}); a ${expectedKind} reply cannot drive it`
+        + (expectedKind === "review" ? ". Use delegate_reply, or the CLI with --kind implement" : ". Use review_reply, or the CLI without --kind"),
+      "SESSION_KIND_MISMATCH",
+    );
+  }
   const resolved = resolveTemplates(skill, state.mode);
   // `start`/`resume` record effort and model in state.json
   const useEffort = effort || state.effort || "high";
@@ -469,6 +479,9 @@ export async function replySession(sessionDir, { inputText, inputFile, model, ef
   if (state.timeout) args.push("--timeout", String(state.timeout));
   const result = await runnerJson(args, prompt, "RESUME_FAILED");
   writeRoundInput(sessionDir, result.round, raw);
+  // The session is open again, so its finalization is stale: meta.json would otherwise keep the
+  // dashboard showing the old verdict (an approved review, a finished delegation) over this round.
+  fs.rmSync(path.join(sessionDir, "meta.json"), { force: true });
   const sources = { ...(state.settings_sources || {}) };
   if (model) sources.model = "requested";
   if (effort) sources.effort = "requested";

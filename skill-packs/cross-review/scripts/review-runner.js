@@ -1969,6 +1969,7 @@ function cmdReply(argv) {
       input: { type: "string" },
       model: { type: "string" },
       effort: { type: "string" },
+      kind: { type: "string" },
     },
     allowPositionals: true,
     strict: true,
@@ -1977,7 +1978,12 @@ function cmdReply(argv) {
     const { dir, err } = validateStateDir(positionals[0]);
     if (err) throw Object.assign(new Error(err), { code: "INVALID_INPUT" });
     if (!values.input) throw Object.assign(new Error("--input is required (--input - reads stdin)"), { code: "INVALID_INPUT" });
-    return replySession(dir, { inputFile: values.input, model: values.model, effort: values.effort });
+    // Resuming an implementation session makes its CLI edit files, so the caller must say so
+    const expectedKind = values.kind || "review";
+    if (expectedKind !== "review" && expectedKind !== "implement") {
+      throw Object.assign(new Error("--kind must be review or implement"), { code: "INVALID_INPUT" });
+    }
+    return replySession(dir, { inputFile: values.input, model: values.model, effort: values.effort, expectedKind });
   });
 }
 

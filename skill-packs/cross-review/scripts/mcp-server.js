@@ -15,12 +15,9 @@ import { z } from "zod";
 import {
   IMPLEMENT_SKILL_NAMES,
   REVIEW_SKILL_NAMES,
-  ReviewError,
   beginSession,
   endSession,
-  readSessionSkill,
   replySession,
-  skillKind,
   waitSession,
 } from "./lib/review-core.js";
 import { DEFAULT_REVIEWER, REVIEWER_NAMES } from "./lib/reviewers/index.js";
@@ -33,22 +30,8 @@ const DEFAULT_WAIT_S = Number.isFinite(envWait) && envWait > 0 ? envWait : FALLB
 
 const SKILLS = REVIEW_SKILL_NAMES;
 const DELEGATE_SKILL = IMPLEMENT_SKILL_NAMES[0];
-
-/**
- * A session's skill kind decides which tools may drive it: the review_* tools are hinted read-only,
- * the delegate_* tools are not, and `reply` resumes whatever skill the session was started with.
- * Checked before anything is rendered or launched, so a refused call leaves the session untouched.
- */
-function requireSessionKind(sessionDir, kind, tool) {
-  const skill = readSessionSkill(sessionDir);
-  if (skillKind(skill) !== kind) {
-    const right = kind === "review" ? "delegate_reply" : "review_reply";
-    throw new ReviewError(
-      `${tool} cannot drive a ${skillKind(skill)} session (skill ${skill}); use ${right}`,
-      "SESSION_KIND_MISMATCH",
-    );
-  }
-}
+// Each reply tool says which session kind it means to drive; replySession refuses the other one
+// before rendering or launching, so a read-only-hinted tool can never resume an implementer.
 
 function ok(value) {
   return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
@@ -138,10 +121,7 @@ function createServer() {
       model: z.string().optional(),
       effort: z.string().optional(),
     },
-  }, tool(a => {
-    requireSessionKind(a.session_dir, "review", "review_reply");
-    return replySession(a.session_dir, { inputText: a.input, model: a.model, effort: a.effort });
-  }));
+  }, tool(a => replySession(a.session_dir, { inputText: a.input, model: a.model, effort: a.effort, expectedKind: "review" })));
 
   server.registerTool("review_end", {
     title: "End a review session",
@@ -190,10 +170,7 @@ function createServer() {
       model: z.string().optional(),
       effort: z.string().optional(),
     },
-  }, tool(a => {
-    requireSessionKind(a.session_dir, "implement", "delegate_reply");
-    return replySession(a.session_dir, { inputText: a.input, model: a.model, effort: a.effort });
-  }));
+  }, tool(a => replySession(a.session_dir, { inputText: a.input, model: a.model, effort: a.effort, expectedKind: "implement" })));
 
   return server;
 }

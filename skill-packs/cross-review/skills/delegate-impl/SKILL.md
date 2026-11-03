@@ -39,8 +39,9 @@ The runner keeps all session state; you supply content and follow `next`.
   those two only poll and stop, and work for any session. Without the MCP tools, or when the client
   refuses a call, run the same verbs through the CLI:
   `node "{{RUNNER_PATH}}" begin --skill delegate-impl --input <file|-> --working-dir <dir>`, then
-  `wait|reply|end <session_dir>`; each prints JSON. Run every verb of one session from the same
-  sandbox context.
+  `wait <session_dir>`, `reply <session_dir> --kind implement --input <file|->` (the `--kind` is
+  required: without it the CLI refuses to resume an implementation session) and `end <session_dir>`;
+  each prints JSON. Run every verb of one session from the same sandbox context.
 - **Input.** One markdown string of placeholder values: `NAME: value` lines first (optionally
   between `---` lines), then one `## NAME` section per multi-line value.
 - **Start:** `delegate_begin {input, working_dir, reviewer?, model?, effort?}`.

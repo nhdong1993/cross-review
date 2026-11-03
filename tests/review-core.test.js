@@ -14,6 +14,7 @@ import {
   parseReviewInput,
   hooks,
   replySession,
+  skillKind,
   waitSession,
 } from "../skill-packs/cross-review/scripts/lib/review-core.js";
 import { followInDashboard } from "../skill-packs/cross-review/scripts/lib/dashboard/follow.js";
@@ -244,7 +245,7 @@ for (const combo of COMBOS) {
     assert.equal(w1.next, combo.peer ? "cross_check" : "respond");
 
     const input2 = inputFor(combo.skill, "r2");
-    const replied = await replySession(begun.session_dir, { inputText: input2 });
+    const replied = await replySession(begun.session_dir, { inputText: input2, expectedKind: skillKind(combo.skill) });
     assert.equal(replied.round, 2);
     const w2 = await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
     assert.equal(w2.status, "completed");
