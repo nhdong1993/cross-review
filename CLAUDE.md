@@ -4,13 +4,14 @@ This repository provides a single-command installer (`npx @tlelabs/cross-review`
 
 ## Project Overview
 
-`cross-review` provides six skills: four review skills, where a second model (the reviewer: Codex CLI by default, or Claude Code or Antigravity) reviews the orchestrator's work under a compiled 3-layer Principal Reviewer system prompt, and two plain planning/execution skills (Claude Code & Antigravity: `/name`, Codex: `$name`):
+`cross-review` provides seven skills: four review skills, where a second model (the reviewer: Codex CLI by default, or Claude Code or Antigravity) reviews the orchestrator's work under a compiled 3-layer Principal Reviewer system prompt; one implementation skill, where that second CLI does the work instead and edits the working directory under a 2-layer Delegated Implementer prompt; and two plain planning/execution skills (Claude Code & Antigravity: `/name`, Codex: `$name`):
 - `loop-plan` — write a phased, code-grounded implementation plan (`loop-plan/v1`) into `<workspace>/.cross-review/plans/`
 - `loop-implement` — execute an approved loop plan phase by phase with TDD, checkpoint reviews, and commits
 - `review-plan` — debate plans before implementation
 - `review-impl` — review uncommitted changes, unpushed commits, or a branch before commit/push/merge
 - `review-think` — peer reasoning/debate on technical topics
 - `review-pr` — review someone else's PR as a peer (correctness, description, merge readiness); your own PR goes through `review-impl`
+- `delegate-impl` — hand one implementation task to another CLI, which edits files and reports back (`delegate_begin`/`delegate_reply`); the orchestrator checks the diff against the report and then reviews it with `review-impl`
 
 The project was called `codex-review` (repo `lploc94/codex_skill`, skills `codex-*-review`, `codex-think-about`); the installer removes that pack's skills, runtime and MCP registration.
 
@@ -66,10 +67,11 @@ skill-packs/cross-review/
 ├── manifest.json
 ├── package.json, package-lock.json   ← runtime dependencies (MCP server only)
 ├── prompts/
-│   ├── production-reviewer-base.md   ← Layer 1: core reviewer methodology, 6 system taxonomies, Anti-Dogma
+│   ├── production-reviewer-base.md   ← Layer 1 (review): core reviewer methodology, 6 system taxonomies, Anti-Dogma
+│   ├── implementer-base.md           ← Layer 1 (implement): mandate, scope discipline, verification duty, git discipline
 │   ├── reviewer-system.md            ← Layer 1 + Layer 2 standalone prompt (Layer 2: always-on recon and spike tactics)
-│   ├── skills/                       ← Layer 3: review-{impl,plan,pr,think}.system.md rubrics
-│   └── compiled/                     ← compiled 3-layer prompts: review-{impl,plan,pr,think}.compiled.md
+│   ├── skills/                       ← Layer 3: review-{impl,plan,pr,think}.system.md rubrics + delegate-impl.system.md
+│   └── compiled/                     ← review-{impl,plan,pr,think}.compiled.md (3 layers) and delegate-impl.compiled.md (2)
 ├── shared/protocol/                  ← core.md, apply-rebut.md, cross-analysis.md (inlined at install)
 ├── scripts/
 │   ├── review-runner.js               ← runner CLI (stdlib only)
@@ -81,6 +83,7 @@ skill-packs/cross-review/
     ├── review-plan/, review-impl/, review-think/, review-pr/
     │   ├── SKILL.md                  ← template
     │   └── references/               ← prompts.md, output-format.md, analysis templates
+    ├── delegate-impl/                ← SKILL.md (its own loop, no shared protocol) + references/
     └── loop-plan/, loop-implement/
         ├── SKILL.md                  ← three-client template (claude, codex, agy)
         └── agents/openai.yaml        ← Codex UI metadata
@@ -136,6 +139,7 @@ Besides the prompts and outputs, a session keeps what the dashboard needs to ret
 - **Reviewer adapters**: everything specific to a reviewer CLI (command line for new and resumed turns, sandbox names, event-log parsing, process identity, model list, CLI status) lives in `scripts/lib/reviewers/<name>.js` (`codex`, `claude`, `agy`; contract in `reviewers/index.js`); optional exports: `encodePrompt` (stdin for a CLI that does not read plain text: agy takes one NDJSON user message), `efforts` (fixed levels, or null when they depend on the model), `checkSelection` (refuse a model/effort before `begin`/`reply` launch anything), `allowCustomModel`. The runner owns spawning (through `lib/command.js`, so an npm `.cmd` shim works on Windows), watchdogs, polling and state; `matchesCmdline` reads the program quote-aware and skips a node host (`"C:\Program Files\…\claude.exe"`, `node …\codex.js`). Sessions store `reviewer`; state without it means `codex`. agy's effort belongs to the model family: `agy models` lists `<family>-<level>` variants, run as `--model <family> --effort <level>`
 - **No nested reviews**: the runner starts every reviewer with `CROSS_REVIEW_REVIEWER=<name>`, and `begin` inside that environment (CLI or MCP) fails with `NESTED_REVIEW`, so a reviewer that has the skills installed (Claude Code) cannot start a review of its own
 - **Reviewer access**: review skills run the reviewer with its full-access sandbox (Codex: `danger-full-access`; Claude Code and agy: `--dangerously-skip-permissions`) so it can run tests, builds and network commands to verify claims; prompts forbid changing project files. The low-level `start` keeps its `read-only` default
+- **Skill kinds**: `SKILL_TEMPLATES` entries carry `kind` (`review`, the default, or `implement`). The sandbox is the same for both — only the prompt differs, since review prompts forbid edits and the implementer prompt requires them. The kind decides three things: which MCP tools may drive a session (`review_begin`'s enum lists review skills only; `review_reply` and `delegate_reply` refuse the other kind with `SESSION_KIND_MISMATCH`, checked before anything is rendered or launched), that `DONE` ends an implement session (one branch in `computeNext`, after the peer check; every existing review branch is untouched), and which prompt base the skill compiles from
 - **Self-contained SKILL.md**: protocol text is inlined at install; no `references/protocol.md`, no flavor text
 - **Built-in output parsers**: ISSUE (PR reviews add Overall Assessment), RESPONSE (older PR rounds) and think-about formats; the verdict is parsed independently of the format, including verdict-only output
 - **Review timeout**: default 18,000 s (5 h); a timeout is resumable only when `poll` reports `timeout_reason: "runner_deadline"`, `recoverable: true`, a `thread_id`, and `progress_observed: true`
@@ -183,6 +187,14 @@ Besides the prompts and outputs, a session keeps what the dashboard needs to ret
 - `skill-packs/` is the single source of truth for templates, runtime and prompts.
 
 ## Breaking Changes
+
+### pack 11.2.0: `delegate-impl`, the implementation skill
+- **New skill** `delegate-impl`: the orchestrator hands one implementation task to another CLI (`codex`, `claude` or `agy`), which **edits files** in the given working directory and reports back in a `SUMMARY` / `FILES CHANGED` / `VERIFICATION` / `OPEN QUESTIONS` / `VERDICT` format. Transport, sessions, settings, resume and the dashboard are the existing ones; no sandbox change was needed, because reviewers already ran with full access and only the prompt kept them from editing.
+- **New MCP tools** `delegate_begin` and `delegate_reply`, annotated `readOnlyHint: false` (Claude Code plan mode refuses them, by design). Polling and closing stay `review_wait` / `review_end`, which only poll and stop. `review_begin`'s `skill` enum now lists the four review skills only, and each reply tool refuses the other kind of session (`SESSION_KIND_MISMATCH`, before rendering or launching), so a read-only-hinted tool can never resume a session whose CLI writes files. Both new tools are in the installer's Codex approval list (`MCP_TOOLS`).
+- **Verdicts** `DONE` and `BLOCKED` join `VERDICT_STATUSES`. `DONE` ends an implementation session (`next_reason: "completed"`, shown on the dashboard as a success like an approval); in a review session it is just another verdict and means `respond`. Review behaviour is unchanged across all skill/verdict/convergence combinations (`tests/delegate-impl.test.js`).
+- **Prompts**: `prompts/implementer-base.md` (Layer 1: mandate, scope discipline, verification duty, git discipline) + `prompts/skills/delegate-impl.system.md` (Layer 3) compile to a 2-layer `delegate-impl.compiled.md`; the reviewer tactics layer stays review-only, and `tests/install-check.mjs` asserts compiled-prompt and agy-agent content per skill kind.
+- **Going back to 11.1.1**: `npx @tlelabs/cross-review@11.1.1`. Finish any `delegate-impl` session first: 11.1.1 does not know the skill and cannot resume or display it.
+- `package.json` and `manifest.json` 11.2.0.
 
 ### pack 11.1.1: stalemate only after disputes
 - **Runner** (`lib/convergence.js`, `poll`): a round is a stalemate (`convergence.stalemate`, `next: done`) only when it repeats the previous round's open ISSUE ids with no new ones, its verdict is not `APPROVE`, and the agent's reply that started it (`inputs/round-NNN.md`) disputed every one of them (`DISPUTED_ITEMS`, or `DISAGREED_POINTS` for the peer skills) without also listing it as fixed. Before, the same ids twice were enough, so an issue reopened after a partial fix, or an `APPROVE` that listed closed issues again, ended the review as a stalemate; all 7 stalemates flagged in 208 stored sessions were of these kinds. A reply line counts only when it starts with `ISSUE-N` (after a list marker or `**`/`` ` ``/`[`), so "None (ISSUE-3 closed)" disputes nothing. A round with no stored reply (low-level `resume`) is never a stalemate.

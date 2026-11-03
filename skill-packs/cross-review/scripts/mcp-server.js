@@ -1,6 +1,8 @@
 #!/usr/bin/env node
-// MCP stdio server exposing the review verbs as typed tools:
-// review_begin, review_wait, review_reply, review_end.
+// MCP stdio server exposing the session verbs as typed tools:
+// review_begin, review_wait, review_reply, review_end (a second model reviews; nothing is edited)
+// and delegate_begin, delegate_reply (a second CLI implements; it edits the working directory).
+// wait and end are shared: they only poll and stop.
 //
 // Session state lives on disk under <working_dir>/.cross-review/sessions/ and the reviewer runs
 // detached, so a review survives this server exiting; call review_wait again with the
@@ -11,10 +13,14 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 import {
-  SKILL_TEMPLATES,
+  IMPLEMENT_SKILL_NAMES,
+  REVIEW_SKILL_NAMES,
+  ReviewError,
   beginSession,
   endSession,
+  readSessionSkill,
   replySession,
+  skillKind,
   waitSession,
 } from "./lib/review-core.js";
 import { DEFAULT_REVIEWER, REVIEWER_NAMES } from "./lib/reviewers/index.js";
@@ -25,7 +31,24 @@ const FALLBACK_WAIT_S = 50;
 const envWait = parseInt(process.env.REVIEW_WAIT_DEFAULT_S || "", 10);
 const DEFAULT_WAIT_S = Number.isFinite(envWait) && envWait > 0 ? envWait : FALLBACK_WAIT_S;
 
-const SKILLS = Object.keys(SKILL_TEMPLATES);
+const SKILLS = REVIEW_SKILL_NAMES;
+const DELEGATE_SKILL = IMPLEMENT_SKILL_NAMES[0];
+
+/**
+ * A session's skill kind decides which tools may drive it: the review_* tools are hinted read-only,
+ * the delegate_* tools are not, and `reply` resumes whatever skill the session was started with.
+ * Checked before anything is rendered or launched, so a refused call leaves the session untouched.
+ */
+function requireSessionKind(sessionDir, kind, tool) {
+  const skill = readSessionSkill(sessionDir);
+  if (skillKind(skill) !== kind) {
+    const right = kind === "review" ? "delegate_reply" : "review_reply";
+    throw new ReviewError(
+      `${tool} cannot drive a ${skillKind(skill)} session (skill ${skill}); use ${right}`,
+      "SESSION_KIND_MISMATCH",
+    );
+  }
+}
 
 function ok(value) {
   return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
@@ -51,8 +74,9 @@ function tool(handler) {
 
 const INPUT_HELP = "Markdown with the skill's placeholder values: optional front-matter of `NAME: value` lines between `---` lines, then one `## NAME` section per multi-line value (e.g. `## USER_REQUEST`).";
 
-// The tools never edit the project: they keep session state under .cross-review/ and run a
-// reviewer told not to modify project files. Claude Code plan mode refuses MCP tools without this hint.
+// The review_* tools never edit the project: they keep session state under .cross-review/ and run a
+// reviewer told not to modify project files. Claude Code plan mode refuses MCP tools without this
+// hint. The delegate_* tools below do edit the project and are hinted accordingly.
 const ANNOTATIONS = { readOnlyHint: true };
 
 // The MCP client's clientInfo (e.g. {name: "claude-code", title: "Claude Code"}): who runs the review.
@@ -114,7 +138,10 @@ function createServer() {
       model: z.string().optional(),
       effort: z.string().optional(),
     },
-  }, tool(a => replySession(a.session_dir, { inputText: a.input, model: a.model, effort: a.effort })));
+  }, tool(a => {
+    requireSessionKind(a.session_dir, "review", "review_reply");
+    return replySession(a.session_dir, { inputText: a.input, model: a.model, effort: a.effort });
+  }));
 
   server.registerTool("review_end", {
     title: "End a review session",
@@ -125,6 +152,48 @@ function createServer() {
       outcome: z.enum(["consensus", "stalemate"]).optional(),
     },
   }, tool(a => endSession(a.session_dir, { outcome: a.outcome })));
+
+  // delegate_*: the implementation side. These make the chosen CLI edit files in working_dir, so
+  // they are not read-only and Claude Code plan mode must refuse them.
+  const WRITES = { readOnlyHint: false };
+
+  server.registerTool("delegate_begin", {
+    title: "Delegate an implementation task",
+    annotations: WRITES,
+    description: `Hand one implementation task to another CLI (${DEFAULT_REVIEWER} by default). The CLI EDITS FILES in working_dir with full access, then reports what it changed; it is told never to commit, push or switch branches. Give parallel tasks their own git worktree. Poll with review_wait and close with review_end. Returns session_dir, and dashboard_url/dashboard_error when Follow reviews is on.`,
+    inputSchema: {
+      input: z.string().describe(INPUT_HELP),
+      working_dir: z.string().describe("Absolute path of the repository the CLI may edit"),
+      model: z.string().optional().describe("Model; omit to use the settings for the chosen CLI, else its default. Remembered for later rounds."),
+      effort: z.string().optional().describe("Reasoning effort; omit to use the settings, else high. Remembered for later rounds."),
+      timeout_seconds: z.number().int().positive().optional(),
+      reviewer: z.enum(REVIEWER_NAMES).optional().describe(`CLI that does the work; omit to use the dashboard settings, else ${DEFAULT_REVIEWER}. Remembered for later rounds.`),
+    },
+  }, tool(a => beginSession({
+    skill: DELEGATE_SKILL,
+    inputText: a.input,
+    workingDir: a.working_dir,
+    model: a.model,
+    effort: a.effort,
+    timeout: a.timeout_seconds,
+    reviewer: a.reviewer,
+    caller: callerInfo(server),
+  })));
+
+  server.registerTool("delegate_reply", {
+    title: "Send change requests to the implementer",
+    annotations: WRITES,
+    description: "Render the revision round from the input and resume the implementer's thread; it EDITS FILES again. Use after reading the real diff. Model and effort default to the session's stored values.",
+    inputSchema: {
+      session_dir: z.string(),
+      input: z.string().describe(INPUT_HELP),
+      model: z.string().optional(),
+      effort: z.string().optional(),
+    },
+  }, tool(a => {
+    requireSessionKind(a.session_dir, "implement", "delegate_reply");
+    return replySession(a.session_dir, { inputText: a.input, model: a.model, effort: a.effort });
+  }));
 
   return server;
 }

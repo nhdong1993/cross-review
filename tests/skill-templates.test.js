@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { PROTOCOL_VARIANTS, renderSkillTemplate } from "../bin/lib/render-skill.js";
-import { SKILL_TEMPLATES } from "../skill-packs/cross-review/scripts/lib/review-core.js";
+import { REVIEW_SKILL_NAMES } from "../skill-packs/cross-review/scripts/lib/review-core.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PACK = path.join(ROOT, "skill-packs/cross-review");
@@ -22,7 +22,8 @@ const VARIANT_MARK = {
 };
 
 test("every runner skill renders with core and its own protocol variant", () => {
-  assert.deepEqual(RUNNER_SKILLS.sort(), Object.keys(SKILL_TEMPLATES).sort());
+  // Review skills share the protocol; implementation skills carry their own loop in SKILL.md
+  assert.deepEqual(RUNNER_SKILLS.sort(), REVIEW_SKILL_NAMES.slice().sort());
   for (const skill of RUNNER_SKILLS) {
     const text = renderSkillTemplate(PACK, skill, OPTS);
     assert.equal(text.split(CORE_MARK).length - 1, 1, `${skill}: core section once`);

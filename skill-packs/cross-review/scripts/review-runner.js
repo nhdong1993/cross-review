@@ -655,6 +655,10 @@ const TEMPLATE_MAP = {
     "analysis": "Independent Analysis Prompt",
     "round2+": "Response Prompt (Round 2+)",
   },
+  "delegate-impl": {
+    "round1": "Task Prompt (Round 1)",
+    "revision": "Revision Prompt (Round 2+)",
+  },
 };
 
 /**

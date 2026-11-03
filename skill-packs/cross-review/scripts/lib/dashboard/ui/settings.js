@@ -2,7 +2,7 @@
 // value, what a review would use at the shown level and where it comes from, and the
 // merge that saves only the fields the user changed. Shared by the page and node tests.
 
-export const SKILLS = ["review-plan", "review-impl", "review-think", "review-pr"];
+export const SKILLS = ["review-plan", "review-impl", "review-think", "review-pr", "delegate-impl"];
 /** Efforts offered when the model catalog is unavailable. */
 export const FALLBACK_EFFORTS = ["low", "medium", "high", "xhigh"];
 export const OTHER = "__other__";

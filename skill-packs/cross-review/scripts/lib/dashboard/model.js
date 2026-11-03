@@ -197,7 +197,7 @@ function verdictOf(final) {
   return (review && ((review.verdict && review.verdict.status) || review.suggested_status)) || null;
 }
 
-const VERDICT_KIND = { APPROVE: "approve", REVISE: "revise", CONSENSUS: "consensus", STALEMATE: "stalemate", CONTINUE: "revise" };
+const VERDICT_KIND = { APPROVE: "approve", REVISE: "revise", CONSENSUS: "consensus", STALEMATE: "stalemate", CONTINUE: "revise", DONE: "approve", BLOCKED: "revise" };
 
 /** The round results with a reviewer that died unpolled resolved from its event log. */
 function effectiveRounds(parsed, { isAlive }) {
@@ -240,7 +240,7 @@ function effectiveRounds(parsed, { isAlive }) {
 
 function finalizedState(parsed, last) {
   const v = String((parsed.meta && parsed.meta.verdict) || "").toUpperCase();
-  if (v === "APPROVE") return "approve";
+  if (v === "APPROVE" || v === "DONE") return "approve";
   if (v === "CONSENSUS") return "consensus";
   if (v === "STALEMATE") return "stalemate";
   if (last && last.final && last.final.status === "completed"
@@ -267,7 +267,8 @@ function sessionStatus(parsed, rounds, now) {
   if (last.final && last.final.status === "completed") {
     const next = computeNext(last.final, state);
     if (next.next === "done") {
-      const s = next.next_reason === "approved" ? "approve" : "stalemate";
+      // "completed" is an implementation session reporting DONE: a success, like an approval
+      const s = next.next_reason === "approved" || next.next_reason === "completed" ? "approve" : "stalemate";
       return { group: "history", state: s, label: LABELS[s], since: last.completedAt };
     }
     if (state.ended_at) return { group: "history", state: "stopped", label: LABELS.stopped, since: state.ended_at, ended: true };
@@ -498,6 +499,7 @@ function titleOf(parsed) {
   if (parsed.skill === "review-plan") t = v.PLAN_PATH ? path.basename(v.PLAN_PATH) : null;
   else if (parsed.skill === "review-think") t = v.QUESTION || null;
   else if (parsed.skill === "review-pr") t = v.PR_TITLE || v.HEAD_REF || null;
+  else if (parsed.skill === "delegate-impl") t = v.TASK || null;
   else t = v.USER_REQUEST || null;
   if (!t) return parsed.id;
   const line = String(t).split("\n").map(s => s.trim()).find(Boolean) || parsed.id;
@@ -606,7 +608,7 @@ export function classify(parsed, { now = Math.floor(Date.now() / 1000), isAlive 
 
   const thread = [];
   const v1 = inputValues(parsed.rounds[0] && parsed.rounds[0].input, parsed.skill, parsed.state.skills_dir);
-  const ask = parsed.skill === "review-think" ? v1.QUESTION : v1.USER_REQUEST;
+  const ask = parsed.skill === "review-think" ? v1.QUESTION : parsed.skill === "delegate-impl" ? v1.TASK : v1.USER_REQUEST;
   if (ask && ask.trim()) thread.push({ who: "us", kind: "ask", md: ask.trim() });
   story.forEach((x, i) => {
     const r = rounds.find(y => y.round === x.round);

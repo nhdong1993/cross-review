@@ -14,6 +14,9 @@ const __dirname = path.dirname(__filename);
 export const DEFAULT_PROMPTS_DIR = path.resolve(__dirname, "../prompts");
 
 export const REVIEW_SKILLS = ["review-impl", "review-plan", "review-pr", "review-think"];
+// Implementation skills compile from the implementer base instead: the reviewer identity forbids
+// editing project files, and the always-on review tactics are a reviewer's recon, not an implementer's.
+export const IMPLEMENT_SKILLS = ["delegate-impl"];
 
 export function buildAlwaysOnTactics() {
   return [
@@ -44,10 +47,10 @@ export function compilePrompts({ promptsDir = DEFAULT_PROMPTS_DIR, quiet = false
   const compiledDir = path.join(promptsDir, "compiled");
   fs.mkdirSync(compiledDir, { recursive: true });
 
+  const implementerBase = fs.readFileSync(path.join(promptsDir, "implementer-base.md"), "utf8").trim();
+
   const outputs = {};
-  for (const skill of REVIEW_SKILLS) {
-    const skillMd = fs.readFileSync(path.join(promptsDir, "skills", `${skill}.system.md`), "utf8").trim();
-    const compiled = `${base}\n\n---\n\n${tactics}\n\n---\n\n${skillMd}\n`;
+  const write = (skill, compiled) => {
     const outPath = path.join(compiledDir, `${skill}.compiled.md`);
     fs.writeFileSync(outPath, compiled, "utf8");
     outputs[skill] = outPath;
@@ -56,6 +59,15 @@ export function compilePrompts({ promptsDir = DEFAULT_PROMPTS_DIR, quiet = false
         `${skill}.compiled.md: ${compiled.split("\n").length} lines, ${compiled.length} bytes (~${Math.round(compiled.length / 4)} tokens)`
       );
     }
+  };
+
+  for (const skill of REVIEW_SKILLS) {
+    const skillMd = fs.readFileSync(path.join(promptsDir, "skills", `${skill}.system.md`), "utf8").trim();
+    write(skill, `${base}\n\n---\n\n${tactics}\n\n---\n\n${skillMd}\n`);
+  }
+  for (const skill of IMPLEMENT_SKILLS) {
+    const skillMd = fs.readFileSync(path.join(promptsDir, "skills", `${skill}.system.md`), "utf8").trim();
+    write(skill, `${implementerBase}\n\n---\n\n${skillMd}\n`);
   }
   return outputs;
 }

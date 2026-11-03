@@ -18,7 +18,10 @@ if (!process.argv[2] || !fs.existsSync(home)) {
 const codexHome = process.env.CODEX_HOME || path.join(home, ".codex");
 const IS_WIN = process.platform === "win32";
 
-const RUNNER_SKILLS = ["review-plan", "review-impl", "review-think", "review-pr"];
+const RUNNER_SKILLS = ["review-plan", "review-impl", "review-think", "review-pr", "delegate-impl"];
+// Of those, the ones whose CLI implements instead of reviewing: their compiled prompt and agy agent
+// are the implementer's two-layer ones, so the reviewer-only content checks do not apply to them.
+const IMPLEMENT_SKILLS = ["delegate-impl"];
 const PLAIN_SKILLS = ["loop-plan", "loop-implement"];
 const SKILLS = [...RUNNER_SKILLS, ...PLAIN_SKILLS];
 // The earlier codex-review pack: its runtime, skills and MCP server must be gone after install
@@ -29,7 +32,8 @@ const LEGACY_SKILLS = [
 ];
 // Skills this pack dropped; an install of them (this pack's runner path) must be gone
 const RETIRED_SKILLS = ["review-commit"];
-const TOOLS = ["review_begin", "review_end", "review_reply", "review_wait"];
+// sorted: the inventory check compares against the sorted tool names the server lists
+const TOOLS = ["delegate_begin", "delegate_reply", "review_begin", "review_end", "review_reply", "review_wait"];
 
 const claudeRoot = path.join(home, ".claude", "skills");
 const agentsRoot = path.join(home, ".agents", "skills");
@@ -159,7 +163,14 @@ for (const skill of RUNNER_SKILLS) {
   check(fs.existsSync(compiledPath), `runtime: missing compiled prompt ${compiledPath}`);
   if (fs.existsSync(compiledPath)) {
     const content = fs.readFileSync(compiledPath, "utf8");
-    check(content.includes("## 9. Always-On Core Tactics"), `runtime: ${skill}.compiled.md lacks the always-on tactics layer`);
+    if (IMPLEMENT_SKILLS.includes(skill)) {
+      check(content.includes("# System Role: Delegated Implementer"), `runtime: ${skill}.compiled.md lacks the implementer identity`);
+      check(content.includes(`# Active Skill Rubric: \`${skill}\``), `runtime: ${skill}.compiled.md lacks its task rubric`);
+      check(content.includes("Status: DONE | BLOCKED"), `runtime: ${skill}.compiled.md lacks the reporting contract`);
+      check(!content.includes("## 9. Always-On Core Tactics"), `runtime: ${skill}.compiled.md must not carry the reviewer tactics layer`);
+    } else {
+      check(content.includes("## 9. Always-On Core Tactics"), `runtime: ${skill}.compiled.md lacks the always-on tactics layer`);
+    }
     check(!content.includes(".cross-review-staging-"), `runtime: ${skill}.compiled.md contains staging path`);
   }
 }
@@ -195,7 +206,12 @@ for (const skill of RUNNER_SKILLS) {
   if (!fs.existsSync(agentFile)) { failures.push(`agy: missing agent ${agentFile}`); continue; }
   const text = fs.readFileSync(agentFile, "utf8");
   check(new RegExp(`^name: ${agentName}$`, "m").test(text), `agy: ${agentName}.md lacks name front matter`);
-  check(text.includes("## 1. Authority Hierarchy") && text.includes("# Active Skill Rubric:"), `agy: ${agentName}.md lacks 3-layer prompt content`);
+  if (IMPLEMENT_SKILLS.includes(skill)) {
+    check(text.includes("# System Role: Delegated Implementer") && text.includes("# Active Skill Rubric:"),
+      `agy: ${agentName}.md lacks the implementer prompt content`);
+  } else {
+    check(text.includes("## 1. Authority Hierarchy") && text.includes("# Active Skill Rubric:"), `agy: ${agentName}.md lacks 3-layer prompt content`);
+  }
   check(!text.includes(".cross-review-staging-"), `agy: ${agentName}.md contains staging path`);
 }
 for (const name of fs.existsSync(agyPluginsRoot) ? fs.readdirSync(agyPluginsRoot) : []) {

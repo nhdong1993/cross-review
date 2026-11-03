@@ -221,8 +221,8 @@ for (const [skill, entry] of Object.entries(SKILL_TEMPLATES)) {
   }
 }
 
-test("there are 5 skill/mode combinations", () => {
-  assert.equal(COMBOS.length, 5);
+test("there are 6 skill/mode combinations", () => {
+  assert.equal(COMBOS.length, 6);
 });
 
 for (const combo of COMBOS) {

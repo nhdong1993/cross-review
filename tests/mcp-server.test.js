@@ -71,16 +71,80 @@ async function call(client, name, args) {
 
 const PLAN_INPUT = "---\nPLAN_PATH: /tmp/plan.md\n---\n## USER_REQUEST\nReview the plan\n";
 
-test("lists the four review tools", async () => {
+test("lists the four review tools and the two delegate tools, hinted by what they do", async () => {
   const { client } = await connect();
   try {
     const { tools } = await client.listTools();
-    assert.deepEqual(tools.map(t => t.name).sort(), ["review_begin", "review_end", "review_reply", "review_wait"]);
-    // Claude Code plan mode refuses MCP tools that are not marked read-only
-    for (const t of tools) assert.equal(t.annotations?.readOnlyHint, true, `${t.name} lacks readOnlyHint`);
+    assert.deepEqual(tools.map(t => t.name).sort(),
+      ["delegate_begin", "delegate_reply", "review_begin", "review_end", "review_reply", "review_wait"]);
+    // Claude Code plan mode refuses MCP tools that are not marked read-only: the review verbs and
+    // the shared wait/end are read-only, the two tools that make a CLI edit files are not.
+    for (const t of tools) {
+      const writes = t.name.startsWith("delegate_");
+      assert.equal(t.annotations?.readOnlyHint, !writes, `${t.name} readOnlyHint`);
+    }
     const begin = tools.find(t => t.name === "review_begin");
     assert.deepEqual(begin.inputSchema.properties.reviewer.enum, ["codex", "claude", "agy"]);
     assert.ok(!begin.inputSchema.required.includes("reviewer"));
+    // An implementation skill must not be reachable through the read-only-hinted review entry point
+    assert.deepEqual(begin.inputSchema.properties.skill.enum.sort(),
+      ["review-impl", "review-plan", "review-pr", "review-think"]);
+    const delegate = tools.find(t => t.name === "delegate_begin");
+    assert.ok(!("skill" in delegate.inputSchema.properties), "delegate_begin has no skill parameter");
+    assert.deepEqual(delegate.inputSchema.properties.reviewer.enum, ["codex", "claude", "agy"]);
+  } finally {
+    await client.close();
+  }
+});
+
+const DELEGATE_INPUT = "## TASK\nAdd a hello function\n\n## ACCEPTANCE\nnode -e \"1\"\n";
+
+test("delegate_begin → review_wait → review_end: DONE finalizes the session", async () => {
+  fs.writeFileSync(outputPath, "### SUMMARY\ndid it\n\n### VERDICT\n- Status: DONE\n- Reason: ok\n");
+  const { client } = await connect();
+  try {
+    const begun = await call(client, "delegate_begin", { input: DELEGATE_INPUT, working_dir: workDir });
+    assert.equal(begun.isError, false);
+    assert.equal(begun.body.status, "running");
+    const state = JSON.parse(fs.readFileSync(path.join(begun.body.session_dir, "state.json"), "utf8"));
+    assert.equal(state.skill_name, "delegate-impl");
+    const waited = await call(client, "review_wait", { session_dir: begun.body.session_dir, max_wait_seconds: 30 });
+    assert.equal(waited.body.next, "done");
+    assert.equal(waited.body.next_reason, "completed");
+    const ended = await call(client, "review_end", { session_dir: begun.body.session_dir });
+    assert.equal(ended.body.finalized, true);
+  } finally {
+    await client.close();
+  }
+});
+
+test("a reply tool refuses the other kind of session, before launching anything", async () => {
+  fs.writeFileSync(outputPath, "### VERDICT\n- Status: DONE\n- Reason: ok\n");
+  const { client } = await connect();
+  try {
+    const delegated = await call(client, "delegate_begin", { input: DELEGATE_INPUT, working_dir: workDir });
+    await call(client, "review_wait", { session_dir: delegated.body.session_dir, max_wait_seconds: 30 });
+    const review = await call(client, "review_begin", { skill: "review-plan", input: PLAN_INPUT, working_dir: workDir });
+    await call(client, "review_wait", { session_dir: review.body.session_dir, max_wait_seconds: 30 });
+
+    const before = fs.readFileSync(path.join(delegated.body.session_dir, "state.json"), "utf8");
+    const calls = fs.readFileSync(env.FAKE_CODEX_LOG, "utf8");
+
+    // read-only review_reply must not be able to resume a session whose CLI edits files
+    const wrongWay = await call(client, "review_reply", { session_dir: delegated.body.session_dir, input: "## CHANGE_REQUESTS\nx\n" });
+    assert.equal(wrongWay.isError, true);
+    assert.equal(wrongWay.body.code, "SESSION_KIND_MISMATCH");
+    // ...and the reverse, so a delegate tool cannot drive a review session either
+    const otherWay = await call(client, "delegate_reply", { session_dir: review.body.session_dir, input: "## CHANGE_REQUESTS\nx\n" });
+    assert.equal(otherWay.isError, true);
+    assert.equal(otherWay.body.code, "SESSION_KIND_MISMATCH");
+
+    assert.equal(fs.readFileSync(path.join(delegated.body.session_dir, "state.json"), "utf8"), before, "refused reply left state unchanged");
+    assert.equal(fs.readFileSync(env.FAKE_CODEX_LOG, "utf8"), calls, "refused reply launched no CLI");
+
+    for (const dir of [delegated.body.session_dir, review.body.session_dir]) {
+      await call(client, "review_end", { session_dir: dir });
+    }
   } finally {
     await client.close();
   }
@@ -128,7 +192,7 @@ test("tool errors come back as isError results and the server keeps serving", as
     assert.equal(badMode.isError, true);
     assert.equal(badMode.body.code, "INVALID_INPUT");
     const { tools } = await client.listTools();
-    assert.equal(tools.length, 4);
+    assert.equal(tools.length, 6);
   } finally {
     await client.close();
   }

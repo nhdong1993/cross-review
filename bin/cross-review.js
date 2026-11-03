@@ -49,7 +49,10 @@ const mcpServerPath = path.join(runtimeDir, 'scripts', 'mcp-server.js');
 
 // RUNNER_SKILLS drive the reviewer through the runner; their SKILL.md templates are rendered with the shared protocol.
 // PLAIN_SKILLS are self-contained SKILL.md templates rendered only with the client's {{CLIENT_*}} values.
-const RUNNER_SKILLS = ['review-plan', 'review-impl', 'review-think', 'review-pr'];
+const RUNNER_SKILLS = ['review-plan', 'review-impl', 'review-think', 'review-pr', 'delegate-impl'];
+// Of those, the ones whose CLI implements instead of reviewing: their prompt is the implementer's
+// two-layer one and their agy agent is an implementer, not a reviewer.
+const IMPLEMENT_SKILLS = ['delegate-impl'];
 const PLAIN_SKILLS = ['loop-plan', 'loop-implement'];
 // Names from the earlier codex-review pack; copies it installed are deleted on install.
 const LEGACY_RUNTIME = 'codex-review';
@@ -62,7 +65,7 @@ const LEGACY_MCP_NAME = 'codex-review';
 const RETIRED_SKILLS = ['review-commit'];
 
 const MCP_NAME = PACK;
-const MCP_TOOLS = ['review_begin', 'review_wait', 'review_reply', 'review_end'];
+const MCP_TOOLS = ['review_begin', 'review_wait', 'review_reply', 'review_end', 'delegate_begin', 'delegate_reply'];
 // Seconds review_wait blocks by default: few calls per review, each under the 5-minute prompt
 // cache TTL. Codex allows 60 s per MCP tool call unless the server sets tool_timeout_sec.
 const WAIT_DEFAULT_S = 270;
@@ -409,7 +412,9 @@ try {
     const agentMd = [
       '---',
       `name: ${agentName}`,
-      `description: Autonomous Principal Technical Reviewer for ${skill} (cross-review)`,
+      IMPLEMENT_SKILLS.includes(skill)
+        ? `description: Autonomous Delegated Implementer for ${skill} (cross-review)`
+        : `description: Autonomous Principal Technical Reviewer for ${skill} (cross-review)`,
       '---',
       '',
       body,
@@ -585,6 +590,7 @@ try {
   console.log('  review-impl           — review uncommitted changes, unpushed commits, or a branch');
   console.log('  review-think          — peer reasoning/debate');
   console.log('  review-pr             — review PRs (branch diff + description)');
+  console.log('  delegate-impl         — hand an implementation task to another CLI (it edits files)');
 
   // Review guidance in ~/.claude/CLAUDE.md and ~/.gemini/GEMINI.md. --auto adds it; a block already there
   // is refreshed on every install, so one written by the earlier pack stops recommending its removed skills.

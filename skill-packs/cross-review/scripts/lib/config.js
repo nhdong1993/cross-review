@@ -19,7 +19,7 @@ import path from "node:path";
 import { DEFAULT_REVIEWER, REVIEWER_NAMES, getReviewer } from "./reviewers/index.js";
 
 /** The skills a config can name (the runner's SKILL_TEMPLATES; a test keeps them equal). */
-export const CONFIG_SKILLS = ["review-plan", "review-impl", "review-think", "review-pr"];
+export const CONFIG_SKILLS = ["review-plan", "review-impl", "review-think", "review-pr", "delegate-impl"];
 export const DEFAULT_EFFORT = "high";
 const MODEL_MAX = 200;
 

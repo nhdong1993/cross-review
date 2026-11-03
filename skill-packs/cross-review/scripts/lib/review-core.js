@@ -27,6 +27,9 @@ const CHECK_INTERVAL_MS = 2000;
 /**
  * Template names per skill and mode. `round1` starts the session, `reply` renders
  * every later round, `analysis` is the orchestrator's independent analysis (peer skills).
+ *
+ * `kind` is "review" (the default) or "implement": an implement skill makes the CLI change
+ * project files, so its sessions are driven by the delegate_* MCP tools and end on DONE.
  */
 export const SKILL_TEMPLATES = {
   "review-plan": {
@@ -48,7 +51,24 @@ export const SKILL_TEMPLATES = {
     peer: true,
     modes: { default: { round1: "round1", reply: "round2+", analysis: "analysis" } },
   },
+  "delegate-impl": {
+    peer: false,
+    kind: "implement",
+    modes: { default: { round1: "round1", reply: "revision" } },
+  },
 };
+
+/** "review" (default) or "implement". */
+export function skillKind(skill) {
+  return SKILL_TEMPLATES[skill]?.kind || "review";
+}
+
+export function isImplementSkill(skill) {
+  return skillKind(skill) === "implement";
+}
+
+export const REVIEW_SKILL_NAMES = Object.keys(SKILL_TEMPLATES).filter(s => !isImplementSkill(s));
+export const IMPLEMENT_SKILL_NAMES = Object.keys(SKILL_TEMPLATES).filter(isImplementSkill);
 
 /** Replaceable in tests: the Follow reviews step (default: dashboard/follow.js, loaded on first use). */
 export const hooks = { follow: null };
@@ -121,6 +141,15 @@ async function runnerJson(args, input = "", fallbackCode = "RUNNER_ERROR") {
 
 function readState(sessionDir) {
   return JSON.parse(fs.readFileSync(path.join(sessionDir, "state.json"), "utf8"));
+}
+
+/** The skill a session was started with, from its state on disk. INVALID_SESSION when unreadable. */
+export function readSessionSkill(sessionDir) {
+  try {
+    return readState(sessionDir).skill_name;
+  } catch (e) {
+    throw new ReviewError(`Cannot read session state: ${e.message}`, "INVALID_SESSION");
+  }
 }
 
 function updateState(sessionDir, updates) {
@@ -355,6 +384,8 @@ export function computeNext(pollJson, state = {}) {
       return { next: "cross_check", next_reason: "peer_verdict_is_advisory" };
     }
     const issues = review && Array.isArray(review.blocks) ? review.blocks.length : 0;
+    // An implementation session ends on DONE; everything below is the unchanged review contract
+    if (isImplementSkill(state.skill_name) && verdict === "DONE") return { next: "done", next_reason: "completed" };
     if (verdict === "APPROVE") return { next: "done", next_reason: "approved" };
     if (verdict || issues > 0) return { next: "respond", next_reason: verdict ? `verdict_${verdict.toLowerCase()}` : "open_issues" };
     return { next: "ask_user", next_reason: "missing_verdict" };

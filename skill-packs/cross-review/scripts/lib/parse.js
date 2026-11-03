@@ -63,7 +63,9 @@ function parseFields(blockContent) {
   return fields;
 }
 
-const VERDICT_STATUSES = ["APPROVE", "REVISE", "CONSENSUS", "CONTINUE", "STALEMATE"];
+// DONE and BLOCKED belong to the implementation skills (delegate-impl); parsing is shared,
+// what a status means for the session is decided by skill kind in review-core's computeNext.
+const VERDICT_STATUSES = ["APPROVE", "REVISE", "CONSENSUS", "CONTINUE", "STALEMATE", "DONE", "BLOCKED"];
 
 /**
  * Blank out fenced code blocks (fence lines included) while keeping every offset, so
