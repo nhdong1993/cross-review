@@ -206,6 +206,7 @@ for (const skill of RUNNER_SKILLS) {
   if (!fs.existsSync(agentFile)) { failures.push(`agy: missing agent ${agentFile}`); continue; }
   const text = fs.readFileSync(agentFile, "utf8");
   check(new RegExp(`^name: ${agentName}$`, "m").test(text), `agy: ${agentName}.md lacks name front matter`);
+  check(/^tools: \[.*\brun_command\b.*\]$/m.test(text), `agy: ${agentName}.md does not grant run_command (no shell for the reviewer)`);
   if (IMPLEMENT_SKILLS.includes(skill)) {
     check(text.includes("# System Role: Delegated Implementer") && text.includes("# Active Skill Rubric:"),
       `agy: ${agentName}.md lacks the implementer prompt content`);

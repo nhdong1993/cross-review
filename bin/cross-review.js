@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { renderSkillTemplate } from './lib/render-skill.js';
 import { commandAvailable, resolveSpawn } from '../skill-packs/cross-review/scripts/lib/command.js';
 import { compilePrompts } from '../skill-packs/cross-review/scripts/build-prompts.js';
+import { agentMarkdown, agentNameForSkill } from '../skill-packs/cross-review/scripts/lib/reviewers/agy.js';
 
 // `npx @tlelabs/cross-review dashboard`: run the dashboard from the package itself; no install step runs
 if (process.argv[2] === 'dashboard') {
@@ -50,9 +51,6 @@ const mcpServerPath = path.join(runtimeDir, 'scripts', 'mcp-server.js');
 // RUNNER_SKILLS drive the reviewer through the runner; their SKILL.md templates are rendered with the shared protocol.
 // PLAIN_SKILLS are self-contained SKILL.md templates rendered only with the client's {{CLIENT_*}} values.
 const RUNNER_SKILLS = ['review-plan', 'review-impl', 'review-think', 'review-pr', 'delegate-impl'];
-// Of those, the ones whose CLI implements instead of reviewing: their prompt is the implementer's
-// two-layer one and their agy agent is an implementer, not a reviewer.
-const IMPLEMENT_SKILLS = ['delegate-impl'];
 const PLAIN_SKILLS = ['loop-plan', 'loop-implement'];
 // Names from the earlier codex-review pack; copies it installed are deleted on install.
 const LEGACY_RUNTIME = 'codex-review';
@@ -407,20 +405,8 @@ try {
   const stagedAgyAgents = path.join(stagedAgyPlugin, 'agents');
   fs.mkdirSync(stagedAgyAgents, { recursive: true });
   for (const skill of RUNNER_SKILLS) {
-    const agentName = `cross-reviewer-${skill}`;
-    const body = fs.readFileSync(path.join(stagedRuntime, 'prompts', 'compiled', `${skill}.compiled.md`), 'utf8').trim();
-    const agentMd = [
-      '---',
-      `name: ${agentName}`,
-      IMPLEMENT_SKILLS.includes(skill)
-        ? `description: Autonomous Delegated Implementer for ${skill} (cross-review)`
-        : `description: Autonomous Principal Technical Reviewer for ${skill} (cross-review)`,
-      '---',
-      '',
-      body,
-      '',
-    ].join('\n');
-    fs.writeFileSync(path.join(stagedAgyAgents, `${agentName}.md`), agentMd, 'utf8');
+    const body = fs.readFileSync(path.join(stagedRuntime, 'prompts', 'compiled', `${skill}.compiled.md`), 'utf8');
+    fs.writeFileSync(path.join(stagedAgyAgents, `${agentNameForSkill(skill)}.md`), agentMarkdown(skill, body), 'utf8');
   }
 
   // 3. Verify runner works
