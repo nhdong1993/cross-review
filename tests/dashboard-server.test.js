@@ -330,6 +330,36 @@ test("watcher: warn after 1200 s, no reply after 1 h, stopped leaves after 1 h â
   }
 });
 
+test("watcher: a session out of the active list is read whole on each rescan; in between, when its state.json or its own folder changes", () => {
+  const root = mk("settled-root");
+  const fx = buildFixture(root, { now: nowS(), livePid: process.pid });
+  const w = createListWatcher({ root });
+  const row = (dir, rescan = false) => find(w.snapshot({ maxScanAgeMs: rescan ? -1 : 1e9 }), idOf(dir));
+  const retitle = (dir, title) => fs.writeFileSync(path.join(dir, "inputs", fs.readdirSync(path.join(dir, "inputs")).sort()[0]), `## USER_REQUEST\n${title}\n`);
+  try {
+    const done = fx.sessions.approved;
+    const title = row(done).title;
+    // a file below the folder rewritten in place: neither state.json nor the folder shows it
+    retitle(done, "An invented new subject.");
+    assert.equal(row(done).title, title);
+    assert.equal(row(done, true).title, "An invented new subject.");
+    // state.json rewritten, as a reply and review_end do
+    const stateFile = path.join(done, "state.json");
+    fs.writeFileSync(stateFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(stateFile, "utf8")), model: "invented-model" }));
+    assert.equal(row(done).model, "invented-model");
+    // a new file in the folder, as review_end's meta.json
+    const quiet = fx.sessions.noReply;
+    assert.equal(row(quiet).label, "no reply");
+    fs.writeFileSync(path.join(quiet, "meta.json"), JSON.stringify({ verdict: "APPROVE" }));
+    assert.notEqual(row(quiet).label, "no reply");
+    // a session in the active list keeps its whole read on every build
+    retitle(fx.sessions.running, "Another invented subject.");
+    assert.equal(row(fx.sessions.running).title, "Another invented subject.");
+  } finally {
+    w.close();
+  }
+});
+
 // ---------- 4c ----------
 
 test("list stream: a new session in a known workspace appears on the next tick; a new workspace after the rescan", async () => {
@@ -727,6 +757,26 @@ test("session stream: unknown session is 404; POST /api/reveal needs a matching 
   }
 });
 
+test("streams: a client that stops reading is dropped once its unsent data passes the bound, not queued for without end", async () => {
+  const { d, fx } = await serve({ tickMs: 20, idleExitSeconds: 1, streamBacklogMax: 256 * 1024 });
+  // a list of about half a megabyte, so the socket buffers fill within a few ticks
+  writePlan(fx.workspaces.inkwell, "wide-notes.md", `# Wide notes\n${Array.from({ length: 1000 }, (_, i) => `## Section ${i} ${"x".repeat(500)}\n`).join("")}`);
+  const sock = net.connect(d.port, "127.0.0.1", () => sock.write(`GET /api/stream?view=list HTTP/1.1\r\nHost: 127.0.0.1:${d.port}\r\nAuthorization: Bearer ${d.token}\r\n\r\n`));
+  sock.on("error", () => {});
+  sock.pause(); // connected, never reads
+  let n = 0;
+  const log = path.join(fx.sessions.running, "output.jsonl");
+  const grow = setInterval(() => appendLines(log, [started(`stall_${n}`, `rg -n marker_${n++} scripts`)]), 20); // the list changes on every tick
+  try {
+    // only a dashboard with no stream left goes idle and closes
+    assert.equal(await Promise.race([d.closed.then(() => "closed"), sleep(10000).then(() => "still streaming")]), "closed");
+  } finally {
+    clearInterval(grow);
+    sock.destroy();
+    await d.close();
+  }
+});
+
 // ---------- Phase 5: settings and avatars ----------
 
 const CATALOG = {
@@ -1047,7 +1097,8 @@ test("plans in the list: five states, review while a review-plan session is acti
     assert.equal(ex.fileSig, `${fs.statSync(pl.files.progress).size}:${fs.statSync(pl.files.progress).mtimeMs}`);
     const doc = planOf(p, "harbor-app", "sync notes.md");
     assert.deepEqual([doc.format, doc.title, doc.progress, doc.planReview, doc.tracked, doc.bar], ["markdown", "Notes on the sync protocol", null, null, null, null]);
-    assert.match(doc.searchText, /merge by paragraph/);
+    // a document: its title and section titles, not its body (the list carries every plan's search text)
+    assert.equal(doc.searchText, "notes on the sync protocol options");
     for (const it of p.plans) for (const k of ["ws", "wsName", "file", "format", "title", "state", "progress", "planReview", "reviewSession", "tracked", "searchText", "changedAt", "fileSig", "sig"]) assert.ok(k in it, `${key(it)}: ${k}`);
 
     // a running review-plan session whose PLAN_PATH reaches the plan through a symlinked parent
@@ -1128,6 +1179,50 @@ test("plans live: a ticked criterion, review rounds, a session's result and phas
   }
 });
 
+test("plans: git runs again when a watched git file changes or after gitMs, not on each rescan", () => {
+  const root = mk("git-watch-root");
+  const fx = buildFixture(root, { now: nowS(), livePid: process.pid });
+  buildPlans(fx);
+  const harbor = fx.workspaces.harbor;
+  git(harbor, "init", "-q");
+  const kept = createListWatcher({ root });
+  const aged = createListWatcher({ root, gitMs: 0 });
+  const phase1Sha = w => {
+    w.snapshot({ maxScanAgeMs: -1 }); // always a rescan
+    return w.plan("harbor-app", "export-formats-plan.md").phases[0].commit.sha;
+  };
+  assert.deepEqual([phase1Sha(kept), phase1Sha(aged)], [null, null]);
+  // a commit that leaves no trace in a watched file (no reflog): only the age brings it in
+  git(harbor, "-c", "core.logAllRefUpdates=false", "commit", "-q", "--allow-empty", "-m", "feat(export): one row model behind CSV and JSON");
+  const sha = git(harbor, "log", "-1", "--format=%h").stdout.trim();
+  assert.equal(phase1Sha(kept), null, "nothing watched changed: git does not run again");
+  assert.equal(phase1Sha(aged), sha);
+  // an ordinary commit writes HEAD's log
+  git(harbor, "commit", "-q", "--allow-empty", "-m", "chore: unrelated");
+  assert.equal(phase1Sha(kept), sha);
+});
+
+test("plans: a git read that failed is tried again after rescanMs, not kept for gitMs", () => {
+  const root = mk("git-failed-root");
+  const fx = buildFixture(root, { now: nowS(), livePid: process.pid });
+  buildPlans(fx);
+  const harbor = fx.workspaces.harbor;
+  git(harbor, "init", "-q");
+  git(harbor, "commit", "-q", "--allow-empty", "-m", "feat(export): one row model behind CSV and JSON");
+  const sha = git(harbor, "log", "-1", "--format=%h").stdout.trim();
+  const config = path.join(harbor, ".git", "config");
+  const valid = fs.readFileSync(config);
+  fs.writeFileSync(config, "[core\n"); // every git command fails
+  const w = createListWatcher({ root, rescanMs: 0 });
+  const phase1Sha = () => {
+    w.snapshot({ maxScanAgeMs: -1 });
+    return w.plan("harbor-app", "export-formats-plan.md").phases[0].commit.sha;
+  };
+  assert.equal(phase1Sha(), null);
+  fs.writeFileSync(config, valid);
+  assert.equal(phase1Sha(), sha);
+});
+
 test("/api/plan: the plan, its real sessions, markdown documents, and 404 for anything outside the plans folder", async () => {
   const { d, fx, pl } = await servePlans();
   const harbor = fx.workspaces.harbor;
@@ -1189,6 +1284,22 @@ test("/api/plan: a checkpoint session's verdict is the one its sessions row show
     assert.notEqual(x.sig, before);
   } finally {
     await d.close();
+  }
+});
+
+test("a plan request reads a finished session's whole folder: a result rewritten in place shows at once", () => {
+  const root = mk("plan-fresh-root");
+  const fx = buildFixture(root, { now: nowS(), livePid: process.pid });
+  writePlan(fx.workspaces.harbor, "result-plan.md", `${PLANS.ready}\n## Progress Log\n- 2026-10-16 Phase 1 checkpoint: ${idOf(fx.sessions.approved)}\n`);
+  const w = createListWatcher({ root });
+  const verdict = () => w.plan("harbor-app", "result-plan.md").sessions[0].verdict;
+  try {
+    assert.equal(verdict(), "APPROVE");
+    // neither state.json nor the folder shows this: the list would wait for its next rescan
+    fs.writeFileSync(path.join(fx.sessions.approved, "final.txt"), JSON.stringify({ status: "completed", round: 3, review: { verdict: { status: "REVISE" } } }));
+    assert.equal(verdict(), "REVISE");
+  } finally {
+    w.close();
   }
 });
 

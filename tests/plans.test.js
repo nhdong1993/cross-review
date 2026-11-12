@@ -3,14 +3,15 @@
 // and the runner's `plans` command. HOME and every workspace are temp dirs; plans are invented.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import childProcess, { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-  fillCommits, gitPlanFacts, isLoopPlan, isPlanFileName, listPlans, parsePlan, planProgress, planState, plansDir, summarizePlan,
+  fillCommits, gitPlanFacts, gitWatch, isLoopPlan, isPlanFileName, listPlans, parsePlan, planProgress, planState, plansDir, summarizePlan,
 } from "../skill-packs/cross-review/scripts/lib/plans.js";
 import { GITIGNORE, ensureCrossReviewDir, globalConfigPath, syncGitignore, workspaceConfigPath } from "../skill-packs/cross-review/scripts/lib/config.js";
 import { findWorkspaces, isWorkspace } from "../skill-packs/cross-review/scripts/lib/dashboard/scan.js";
@@ -184,10 +185,10 @@ test("listPlans and summarizePlan: .md files of the plans folder; loop-plan plan
   assert.equal(sum["kế-hoạch.md"].title, "kế-hoạch.md");
   assert.equal(sum["sync notes.md"].title, "Sync notes");
   assert.equal(sum["export-formats-plan.md"].path, path.join(plansDir(ws), "export-formats-plan.md"));
-  // Search text: words only in the Target, only in a phase name, only in a document's body
+  // Search text: words only in the Target, only in a phase name; a document's title and section titles, not its body
   assert.match(sum["export-formats-plan.md"].searchText, /50 000 rows/);
   assert.match(sum["export-formats-plan.md"].searchText, /streaming large exports/);
-  assert.match(sum["sync notes.md"].searchText, /tombstone/);
+  assert.equal(sum["sync notes.md"].searchText, "sync notes options");
   assert.equal(sum["export-formats-plan.md"].tracked, null); // no git facts asked for
   assert.equal(isLoopPlan(EXPORT), true);
   assert.equal(isLoopPlan("```\n## Plan schema\nloop-plan/v1\n```\n"), false);
@@ -240,6 +241,55 @@ test("ensureCrossReviewDir follows track_plans; a broken config keeps the file i
 });
 
 // ---------- git facts ----------
+
+test("gitWatch names HEAD, its log, the exclude file and the .gitignore files on the way to the plans", () => {
+  const ws = fs.realpathSync(gitRepo("watch"));
+  const ignores = top => [top, path.join(top, ".cross-review"), plansDir(top)].map(d => path.join(d, ".gitignore"));
+  assert.deepEqual(gitWatch(ws), [path.join(ws, ".git", "HEAD"), path.join(ws, ".git", "logs", "HEAD"), path.join(ws, ".git", "info", "exclude"), ...ignores(ws)]);
+  // a linked worktree: its own HEAD, the main repository's exclude file
+  assert.equal(git(ws, "commit", "-q", "--allow-empty", "-m", "first").status, 0);
+  const wt = path.join(fs.realpathSync(dir("watch-wt")), "wt");
+  assert.equal(git(ws, "worktree", "add", "-q", wt).status, 0);
+  const own = path.join(ws, ".git", "worktrees", "wt");
+  assert.deepEqual(gitWatch(wt), [path.join(own, "HEAD"), path.join(own, "logs", "HEAD"), path.join(ws, ".git", "info", "exclude"), ...ignores(wt)]);
+  // a workspace below the repository's top folder also watches the top .gitignore
+  const sub = path.join(ws, "packages", "app");
+  fs.mkdirSync(sub, { recursive: true });
+  assert.deepEqual(gitWatch(sub).slice(3), [path.join(ws, ".gitignore"), ...ignores(sub)]);
+  // GIT_COMMON_DIR in the environment wins over the git dir's own files: the exclude file git reads
+  const priv = path.join(fs.realpathSync(dir("watch-env")), "git");
+  fs.mkdirSync(priv);
+  fs.copyFileSync(path.join(ws, ".git", "HEAD"), path.join(priv, "HEAD"));
+  Object.assign(process.env, { GIT_DIR: priv, GIT_COMMON_DIR: path.join(ws, ".git"), GIT_WORK_TREE: sub });
+  try {
+    assert.deepEqual(gitWatch(sub).slice(0, 3), [path.join(priv, "HEAD"), path.join(priv, "logs", "HEAD"), path.join(ws, ".git", "info", "exclude")]);
+  } finally {
+    for (const k of ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"]) delete process.env[k];
+  }
+  assert.deepEqual(gitWatch(dir("watch-plain")), []);
+  // a folder name with a line break still gives its own HEAD
+  if (process.platform !== "win32") {
+    const odd = path.join(fs.realpathSync(dir("watch-odd")), "line\nbreak");
+    fs.mkdirSync(odd);
+    assert.equal(git(odd, "init", "-q").status, 0);
+    assert.equal(gitWatch(odd)[0], path.join(odd, ".git", "HEAD"));
+  }
+});
+
+test("gitPlanFacts marks the facts as failed when a git command did not finish", () => {
+  const ws = gitRepo("failed");
+  assert.equal(gitPlanFacts(ws, []).failed, false);
+  const real = childProcess.spawnSync;
+  childProcess.spawnSync = (cmd, args, opts) => (args.includes("log") ? { error: new Error("ETIMEDOUT"), status: null } : real(cmd, args, opts));
+  syncBuiltinESMExports();
+  try {
+    const f = gitPlanFacts(ws, []);
+    assert.deepEqual([f.repo, f.failed, f.commits.size], [true, true, 0]);
+  } finally {
+    childProcess.spawnSync = real;
+    syncBuiltinESMExports();
+  }
+});
 
 test("gitPlanFacts and tracked follow git, not the setting", () => {
   // A root .gitignore that ignores the whole .cross-review/ blocks the exception inside it

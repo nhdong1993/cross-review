@@ -263,7 +263,8 @@ export function summarizePlanText(ws, file, text, facts = null) {
     const title = parsed.title || file;
     return {
       ...base, format: "markdown", title, state: "doc", progress: null, planReview: null,
-      searchText: `${title} ${plainText(parsed.sections.map(s => `${s.title || ""} ${s.md}`).join(" "))}`.toLowerCase(),
+      // titles only: the list sends every plan's search text to the page
+      searchText: `${title} ${plainText(parsed.sections.map(s => s.title || "").join(" "))}`.toLowerCase(),
     };
   }
   const title = parsed.title || file;
@@ -288,26 +289,33 @@ function runGit(ws, args, input) {
  * Read-only git facts for the plans of `ws`: which are ignored, whether a new plan named like
  * loop-plan's would be ignored and by which rule, and subject → SHA of recent commits (only
  * subjects that occur once; a repeated subject maps to null). Outside git: { repo: false }.
+ * `failed`: a git command did not finish (a timeout), so the facts may miss something.
  */
 export function gitPlanFacts(ws, files) {
-  const none = { repo: false, ignored: new Set(), newPlansIgnored: null, blockedBy: null, commits: new Map() };
+  const none = { repo: false, ignored: new Set(), newPlansIgnored: null, blockedBy: null, commits: new Map(), failed: false };
   const rel = f => path.posix.join(".cross-review", "plans", f);
+  let failed = false;
+  const run = (args, input) => {
+    const r = runGit(ws, args, input);
+    if (r.status === null) failed = true;
+    return r;
+  };
   // `-q` decides; `-v` also exits 0 on a negation match, so it only names the rule
-  const probe = runGit(ws, ["check-ignore", "-q", rel(PROBE_PLAN)]);
-  if (probe.status !== 0 && probe.status !== 1) return none;
+  const probe = run(["check-ignore", "-q", rel(PROBE_PLAN)]);
+  if (probe.status !== 0 && probe.status !== 1) return { ...none, failed };
   const ignored = new Set();
   if (files.length) {
-    const r = runGit(ws, ["check-ignore", "--stdin", "-z"], files.map(rel).join("\0") + "\0");
-    if (r.status !== 0 && r.status !== 1) return none;
+    const r = run(["check-ignore", "--stdin", "-z"], files.map(rel).join("\0") + "\0");
+    if (r.status !== 0 && r.status !== 1) return { ...none, failed };
     for (const p of r.stdout.split("\0")) if (p) ignored.add(path.posix.basename(p));
   }
   let blockedBy = null;
   if (probe.status === 0) {
-    const v = runGit(ws, ["check-ignore", "-v", rel(PROBE_PLAN)]);
+    const v = run(["check-ignore", "-v", rel(PROBE_PLAN)]);
     blockedBy = v.status === 0 ? v.stdout.split("\t")[0].trim() || null : null;
   }
   const commits = new Map();
-  const log = runGit(ws, ["log", "-n", String(LOG_MAX_COMMITS), "--format=%h%x09%s"]);
+  const log = run(["log", "-n", String(LOG_MAX_COMMITS), "--format=%h%x09%s"]);
   if (log.status === 0) {
     for (const line of log.stdout.split("\n")) {
       const tab = line.indexOf("\t");
@@ -316,7 +324,31 @@ export function gitPlanFacts(ws, files) {
       commits.set(subject, commits.has(subject) ? null : line.slice(0, tab));
     }
   }
-  return { repo: true, ignored, newPlansIgnored: probe.status === 0, blockedBy, commits };
+  return { repo: true, ignored, newPlansIgnored: probe.status === 0, blockedBy, commits, failed };
+}
+
+/**
+ * Files whose change can change gitPlanFacts(ws), so a caller keeps the facts while their size
+ * and mtime stay the same: HEAD and its log (a commit, a checkout), the exclude file, and the
+ * .gitignore of the repository's top folder, the workspace, .cross-review and the plans folder.
+ * Not covered: the index (`git add -f`), a .gitignore between the top folder and a nested
+ * workspace, the user's global excludes, a HEAD move without a reflog. Outside git, or when
+ * git fails: [].
+ */
+export function gitWatch(ws) {
+  // --show-cdup is only "../" steps, so the first line break ends it even when a path has one
+  const r = runGit(ws, ["rev-parse", "--show-cdup", "--absolute-git-dir"]);
+  const cut = r.stdout.indexOf("\n");
+  if (r.status !== 0 || cut < 0) return [];
+  const c = runGit(ws, ["rev-parse", "--git-common-dir"]); // alone: one path, whatever it holds
+  if (c.status !== 0) return [];
+  const top = path.resolve(ws, r.stdout.slice(0, cut));
+  const gitDir = path.resolve(r.stdout.slice(cut + 1).replace(/\n$/, ""));
+  const common = path.resolve(ws, c.stdout.replace(/\n$/, ""));
+  return [
+    path.join(gitDir, "HEAD"), path.join(gitDir, "logs", "HEAD"), path.join(common, "info", "exclude"),
+    ...[...new Set([top, ws, path.join(ws, ".cross-review"), plansDir(ws)])].map(d => path.join(d, ".gitignore")),
+  ];
 }
 
 /** A copy of `parsed` with the SHA of each finished phase whose planned subject is in one commit. */

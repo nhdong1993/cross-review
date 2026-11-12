@@ -21,7 +21,7 @@ import { findWorkspaces, isWorkspace, listSessions, sessionsDir, SCAN_DEPTH, SES
 import { discoveryFile, removeDiscoveryIfOwn, writeDiscovery } from "./discovery.js";
 import { AvatarError, avatarFile, listAvatars, removeAvatar, saveAvatar, AVATAR_MAX_BYTES } from "./avatars.js";
 import { CONFIG_SKILLS, ensureCrossReviewDir, globalConfigPath, readConfig, resolvePlanSettings, syncGitignore, validateConfig, workspaceConfigPath, writeConfig } from "../config.js";
-import { fillCommits, gitPlanFacts, listPlans, parsePlan, planProgress, planState, plansDir, plansWarning, summarizePlanText } from "../plans.js";
+import { fillCommits, gitPlanFacts, gitWatch, listPlans, parsePlan, planProgress, planState, plansDir, plansWarning, summarizePlanText } from "../plans.js";
 import { DEFAULT_REVIEWER, REVIEWER_NAMES, getReviewer } from "../reviewers/index.js";
 import { mergeForm } from "./ui/settings.js";
 import { fetchLatestVersion, isNewer, readUpdateCache, UPDATE_TTL_S, updateCachePath, writeUpdateCache } from "./update.js";
@@ -34,6 +34,7 @@ export const PORT_MIN = 20000;
 export const PORT_MAX = 30000;
 export const PORT_TRIES = 50;
 const PING_MS = 15000;
+const STREAM_BACKLOG_MAX = 8 * 1024 * 1024;
 const REQUEST_SCAN_AGE_MS = 5000;
 const ACTIVITY_PAGE = 20;
 const SETTINGS_BODY_MAX = 64 * 1024;
@@ -113,20 +114,21 @@ const sessionFiles = dir => signatureParts(dir).filter(p => !ACTIVITY_FILE.test(
 // ---------- the live list ----------
 
 /**
- * Sessions of every followed workspace, grouped and sorted. Each tick re-reads the session
- * folders, re-parses a session only when its files changed, and re-classifies everything
- * with now(), since warn, "no reply" and the one-hour window change with the clock alone.
+ * Sessions of every followed workspace, grouped and sorted. Each tick re-reads the folders of
+ * the sessions in the active list (the others: see parsedFor), re-parses a session only when
+ * its files changed, and re-classifies everything with now(), since warn, "no reply" and the
+ * one-hour window change with the clock alone.
  * Subscribers get the full list on subscribe and again whenever it differs from what they
  * were last sent.
  */
-export function createListWatcher({ root, now = () => Math.floor(Date.now() / 1000), rescanMs = 10000, tickMs = 1000, isAlive = pidAlive, depth = SCAN_DEPTH } = {}) {
+export function createListWatcher({ root, now = () => Math.floor(Date.now() / 1000), rescanMs = 10000, tickMs = 1000, gitMs = 600000, isAlive = pidAlive, depth = SCAN_DEPTH } = {}) {
   const realRoot = fs.realpathSync(root);
   const version = packVersion();
   const scanned = new Map(); // ws key → absolute path
   const registered = new Map();
-  const cache = new Map(); // session dir → { sig, parsed }
+  const cache = new Map(); // session dir → { sig, parsed, scan, glance, settled }
   const planCache = new Map(); // plan file → { fileSig, changedAt, parsed, summary }
-  const gitCache = new Map(); // workspace path → { key, scan, facts }
+  const gitCache = new Map(); // workspace path → { key, watch, stamp, until, facts }
   const subs = new Set();
   let planIndex = new Map(); // `${ws}\0${file}` → what /api/plan needs, from the last build
   let lastScan = 0;
@@ -154,15 +156,36 @@ export function createListWatcher({ root, now = () => Math.floor(Date.now() / 10
     return all;
   }
 
-  function parsedFor(dir) {
-    const sig = signature(dir);
+  /** Size and mtime of each file, "-" for a missing one. */
+  const stampOf = files => files.map(f => {
+    try {
+      const st = fs.statSync(f);
+      return `${st.size}:${st.mtimeMs}`;
+    } catch {
+      return "-";
+    }
+  }).join("|");
+
+  /**
+   * The parsed session, read again when a file of its folder changed. `listing` (the list
+   * build): a session out of the active list has its whole folder checked on each rescan only;
+   * in between, just state.json and the folder itself, which a reply, a new round and
+   * review_end all change.
+   */
+  function parsedFor(dir, listing = false) {
     const hit = cache.get(dir);
-    if (hit && hit.sig === sig) return hit.parsed;
+    const glance = stampOf([dir, path.join(dir, "state.json")]);
+    if (listing && hit && hit.settled && hit.scan === lastScan && hit.glance === glance) return hit.parsed;
+    const sig = signature(dir); // after the glance: a change that lands meanwhile is seen next time
+    if (hit && hit.sig === sig) {
+      Object.assign(hit, { scan: lastScan, glance });
+      return hit.parsed;
+    }
     let parsed = null;
     try {
       parsed = readSession(dir);
     } catch {}
-    cache.set(dir, { sig, parsed });
+    cache.set(dir, { sig, parsed, scan: lastScan, glance });
     return parsed;
   }
 
@@ -190,13 +213,22 @@ export function createListWatcher({ root, now = () => Math.floor(Date.now() / 10
     return entry;
   }
 
-  /** Git facts of a workspace's plans: again on each rescan, when its plan files change, or after a settings save. */
+  /**
+   * Git facts of a workspace's plans: again when its plan files or a file of gitWatch change,
+   * after a settings save, or once they are older than gitMs (what gitWatch does not cover).
+   * Not on each rescan: git runs synchronously, several times per workspace with plans. Only
+   * a read with nothing to watch (outside git, or git failed) is tried again after rescanMs.
+   */
   function gitFor(abs, files, entries) {
     const key = files.map((f, i) => `${f}:${entries[i] ? entries[i].fileSig : "-"}`).join("|");
     const hit = gitCache.get(abs);
-    if (hit && hit.key === key && hit.scan === lastScan) return hit.facts;
+    if (hit && hit.key === key && Date.now() < hit.until && hit.stamp === stampOf(hit.watch)) return hit.facts;
+    const watch = gitWatch(abs);
+    const stamp = stampOf(watch); // before the facts: a commit that lands meanwhile runs git again
     const facts = gitPlanFacts(abs, files);
-    gitCache.set(abs, { key, scan: lastScan, facts });
+    // half to all of gitMs, so the workspaces read in one build do not all come due in one build
+    const keep = watch.length && facts.repo && !facts.failed ? gitMs * (0.5 + Math.random() / 2) : rescanMs;
+    gitCache.set(abs, { key, watch, stamp, until: Date.now() + keep, facts });
     return facts;
   }
 
@@ -276,7 +308,8 @@ export function createListWatcher({ root, now = () => Math.floor(Date.now() / 10
     return plans;
   }
 
-  function build() {
+  /** `listing` false: every session's whole folder is checked (a plan request). */
+  function build(listing = true) {
     const t = now();
     const wsMap = workspaces();
     const names = new Map();
@@ -294,7 +327,7 @@ export function createListWatcher({ root, now = () => Math.floor(Date.now() / 10
       sessionsByWs.set(ws, here);
       for (const dir of listSessions(abs)) {
         seen.add(dir);
-        const parsed = parsedFor(dir);
+        const parsed = parsedFor(dir, listing);
         if (!parsed) continue;
         let summary;
         try {
@@ -302,6 +335,7 @@ export function createListWatcher({ root, now = () => Math.floor(Date.now() / 10
         } catch {
           continue;
         }
+        cache.get(dir).settled = summary.group !== "active";
         (summary.group === "active" ? active : history).push({ ...summary, ws, wsName: name });
         here.set(summary.id, { parsed, summary, abs });
       }
@@ -390,7 +424,7 @@ export function createListWatcher({ root, now = () => Math.floor(Date.now() / 10
         abs = workspaces().get(ws);
       }
       if (!abs || !listPlans(abs).includes(file)) return null;
-      build();
+      build(false);
       const hit = planIndex.get(`${ws}\0${file}`);
       if (!hit) return null;
       const { item, full, parsed, named } = hit;
@@ -600,7 +634,7 @@ export async function startDashboard({
   root = process.cwd(), port = null, open = false, idleExitSeconds = null,
   pickPort = randomPort, discoveryFile: discFile = discoveryFile(), host = "127.0.0.1",
   now, tickMs = 1000, rescanMs, isAlive, reveal = revealFolder, catalogs: injectedCatalogs, catalogCaches = {},
-  latestVersion = fetchLatestVersion, updateCache = updateCachePath(),
+  latestVersion = fetchLatestVersion, updateCache = updateCachePath(), streamBacklogMax = STREAM_BACKLOG_MAX,
 } = {}) {
   const watcher = createListWatcher({ root, now, tickMs, rescanMs, isAlive });
   const token = crypto.randomBytes(32).toString("hex");
@@ -864,10 +898,17 @@ export async function startDashboard({
 
   function openStream(req, res) {
     res.writeHead(200, { ...BASE_HEADERS, "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-store", Connection: "keep-alive" });
-    res.write(": connected\n\n");
+    // A client that stopped reading (a frozen tab) is dropped once this much is unsent, rather than
+    // every event queued for it in memory; the page reconnects and starts from a fresh snapshot.
+    const write = text => {
+      if (res.destroyed) return;
+      if (res.writableLength > streamBacklogMax) res.destroy();
+      else res.write(text);
+    };
+    write(": connected\n\n");
     const entry = { res };
     streams.add(entry);
-    const ping = setInterval(() => res.write(": ping\n\n"), PING_MS);
+    const ping = setInterval(() => write(": ping\n\n"), PING_MS);
     const cleanups = [() => clearInterval(ping)];
     req.on("close", () => {
       for (const fn of cleanups) fn();
@@ -875,7 +916,7 @@ export async function startDashboard({
       if (!streams.size) idleSince = Date.now();
     });
     return {
-      event: (name, value) => res.write(`event: ${name}\ndata: ${JSON.stringify(value)}\n\n`),
+      event: (name, value) => write(`event: ${name}\ndata: ${JSON.stringify(value)}\n\n`),
       onClose: fn => cleanups.push(fn),
     };
   }
