@@ -477,10 +477,10 @@ test("dashboard.json: written 0600 with pid, port, token, root; removed on close
 // ---------- 8, AC-3.5 ----------
 
 /** Spawn a dashboard command with a temp HOME; resolves once it prints its URL. */
-/** A bin dir whose `claude` and `agy` fail at once: the dashboard asks every reviewer CLI at start, never the real ones here. */
+/** A bin dir whose `claude`, `agy` and `grok` fail at once: the dashboard asks every reviewer CLI at start, never the real ones here. */
 function stubReviewerCli() {
   const bin = mk("stub-bin");
-  for (const name of ["claude", "agy"]) writeFakeCli(bin, name, "process.exit(1);\n");
+  for (const name of ["claude", "agy", "grok"]) writeFakeCli(bin, name, "process.exit(1);\n");
   return bin;
 }
 
@@ -1367,14 +1367,14 @@ const catalogOf = (version, models, defaultModel = null) => {
 const CLAUDE_MODELS = [{ slug: "opus", name: "Opus", description: "Invented.", efforts: ["low", "high", "max"] }];
 const AGY_MODELS = [{ slug: "gemini-x-flash", name: "Gemini X Flash", description: "", efforts: ["high", "low"] }];
 
-test("settings payload per reviewer: three entries; a failing catalog is isolated", async () => {
+test("settings payload per reviewer: one entry each; a failing catalog is isolated", async () => {
   const agy = { listModels: async () => { throw new Error("agy models: not signed in"); }, defaultModel: () => { throw new Error("no settings"); }, cliInfo: async () => ({ version: "9.9.9", loggedIn: null }) };
   const { d } = await serve({ catalogs: { codex: CATALOG, claude: catalogOf("claude 9.9.9-invented", CLAUDE_MODELS, "opus"), agy } });
   try {
     const s = await getJson(d, "/api/settings");
-    assert.deepEqual(s.reviewerNames, ["codex", "claude", "agy"]);
+    assert.deepEqual(s.reviewerNames, ["codex", "claude", "agy", "grok"]);
     assert.equal(s.defaultReviewer, "codex");
-    assert.deepEqual(Object.keys(s.reviewers), ["codex", "claude", "agy"]);
+    assert.deepEqual(Object.keys(s.reviewers), ["codex", "claude", "agy", "grok"]);
     for (const k of ["models", "codexDefault", "reviewer"]) assert.equal(s[k], undefined, `no top-level ${k}`);
     const { codex, claude, agy: a } = s.reviewers;
     assert.deepEqual([codex.label, codex.models[0].slug, codex.defaultModel, codex.cli.version, codex.efforts, codex.allowCustomModel],
@@ -1382,6 +1382,9 @@ test("settings payload per reviewer: three entries; a failing catalog is isolate
     assert.deepEqual([claude.label, claude.models, claude.defaultModel, claude.efforts, claude.allowCustomModel],
       ["Claude Code", CLAUDE_MODELS, "opus", ["low", "medium", "high", "xhigh", "max"], true]);
     assert.deepEqual([a.label, a.models, a.defaultModel, a.efforts, a.allowCustomModel], ["Antigravity", null, null, null, false]);
+    // Grok: no catalog was given here; its levels depend on the model and any model name is allowed
+    const g = s.reviewers.grok;
+    assert.deepEqual([g.label, g.models, g.defaultModel, g.cli, g.efforts, g.allowCustomModel], ["Grok Build", null, null, null, null, true]);
     for (const r of Object.values(s.reviewers)) assert.equal(typeof r.modelsRefreshing, "boolean");
   } finally {
     await d.close();

@@ -637,7 +637,7 @@ function onPlanClick(e) {
 
 const AVATAR = { rv: "avatars/reviewer.png", ag: "avatars/agent.png", us: "avatars/you.png" };
 const NAME = { rv: "Reviewer", ag: "Agent", us: "You" };
-const REVIEWER_LETTERS = { codex: "CX", claude: "CC", agy: "AG" };
+const REVIEWER_LETTERS = { codex: "CX", claude: "CC", agy: "AG", grok: "GK" };
 const CALLER_LETTERS = { "claude-code": "CC", "codex-mcp-client": "CX" };
 /** table[key] for the table's own keys only: names from session data can be "constructor" or "__proto__". */
 const own = (table, key) => (Object.hasOwn(table, key) ? table[key] : undefined);
@@ -1062,7 +1062,7 @@ let savesStarted = 0; // counts saves sent; a settings load that saw one start m
 const ALL_PATHS = ["reviewer", "open_dashboard", "open_plans", "track_plans", "check_updates",
   ...Object.keys(REVIEWERS).flatMap(r => [`reviewers.${r}.model`, `reviewers.${r}.effort`, ...SKILLS.flatMap(s => [`reviewers.${r}.skills.${s}.model`, `reviewers.${r}.skills.${s}.effort`])])];
 /** Where each reviewer's model list comes from (one without an entry lists aliases and takes any name). */
-const MODEL_SOURCE = { codex: "codex debug models", agy: "agy models" };
+const MODEL_SOURCE = { codex: "codex debug models", agy: "agy models", grok: "grok models" };
 const clone = x => JSON.parse(JSON.stringify(x || {}));
 const modelName = (slug, models) => {
   const m = slug && models ? models.find(x => x.slug === slug) : null;
@@ -1185,7 +1185,7 @@ function effectiveModel(reviewer) {
   return resolveHere({ global: globalHere(), workspace: workspaceHere(), skill: null, key: "model", reviewer }).value || reviewerInfo(reviewer).defaultModel;
 }
 
-/** The CLI line under Reviewer: version and sign-in (agy reports no sign-in), or the CLI missing. */
+/** The CLI line under Reviewer: version and sign-in (agy and grok report no sign-in), or the CLI missing. */
 function cliLine(name) {
   const cli = reviewerInfo(name).cli;
   if (!cli || !cli.version) return `The ${name} CLI was not found.`;
@@ -1237,11 +1237,12 @@ function renderSettings() {
   const em = effectiveModel(target);
   const desc = models && models.find(m => m.slug === em);
   const about = desc && desc.description ? `${desc.description} ` : "";
-  const source = own(MODEL_SOURCE, target) || `${target} models`;
-  $("#model-help").textContent = info.allowCustomModel
+  const listed = own(MODEL_SOURCE, target);
+  const source = listed || `${target} models`;
+  $("#model-help").textContent = info.allowCustomModel && !listed
     ? `${about}${info.label} aliases; pick Other… for a full model name.`
     : models
-      ? `${about}Listed by ${source}, ${ago(info.modelsFetchedAt)}.`
+      ? `${about}Listed by ${source}, ${ago(info.modelsFetchedAt)}.${info.allowCustomModel ? " Pick Other… for any other model name." : ""}`
       : `The model list is unavailable (${source} failed). Pick Other… to type a model name.`;
   $("#refresh").lastChild.textContent = sv.refreshed ? "refreshed just now" : "refresh list";
 

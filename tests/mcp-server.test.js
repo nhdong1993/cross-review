@@ -84,14 +84,14 @@ test("lists the four review tools and the two delegate tools, hinted by what the
       assert.equal(t.annotations?.readOnlyHint, !writes, `${t.name} readOnlyHint`);
     }
     const begin = tools.find(t => t.name === "review_begin");
-    assert.deepEqual(begin.inputSchema.properties.reviewer.enum, ["codex", "claude", "agy"]);
+    assert.deepEqual(begin.inputSchema.properties.reviewer.enum, ["codex", "claude", "agy", "grok"]);
     assert.ok(!begin.inputSchema.required.includes("reviewer"));
     // An implementation skill must not be reachable through the read-only-hinted review entry point
     assert.deepEqual(begin.inputSchema.properties.skill.enum.sort(),
       ["review-impl", "review-plan", "review-pr", "review-think"]);
     const delegate = tools.find(t => t.name === "delegate_begin");
     assert.ok(!("skill" in delegate.inputSchema.properties), "delegate_begin has no skill parameter");
-    assert.deepEqual(delegate.inputSchema.properties.reviewer.enum, ["codex", "claude", "agy"]);
+    assert.deepEqual(delegate.inputSchema.properties.reviewer.enum, ["codex", "claude", "agy", "grok"]);
   } finally {
     await client.close();
   }

@@ -86,6 +86,7 @@ function launchReviewer(
     sandbox,
     systemPromptFile,
     skillName,
+    promptFile, // for a CLI that takes a file, not stdin (Grok)
   });
 
   // A reviewer that reads its prompt in its own format gets that on stdin; prompt.txt stays the text
@@ -433,7 +434,9 @@ function parseRoundLog(reviewer, stateDir, lastLineCount, elapsed, processAlive,
 
   const events = reviewer.parseEvents(allLines, allLines.slice(lastLineCount), elapsed);
   let turnCompleted = events.turnCompleted;
-  const turnFailed = events.turnFailed;
+  // A CLI that ends a stopped turn with an error result (Grok: "cancelled") did not fail when the
+  // stop was this runner's deadline: that is the timeout below, once the process is gone
+  const turnFailed = events.turnFailed && !(events.cancelled && runnerDeadlineObserved);
   const turnFailedMsg = events.failMessage;
   const extractedThreadId = events.threadId;
   const reviewText = events.reviewText;

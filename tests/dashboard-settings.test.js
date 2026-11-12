@@ -222,6 +222,7 @@ test("settings resolve per reviewer: reviewers.<name> only, with that reviewer's
   assert.deepEqual(resolveHere({ global, workspace, skill: "review-plan", key: "model", reviewer: "codex" }), { value: "gpt-plan", source: "global, this skill" });
   assert.deepEqual(resolveHere({ global, workspace, skill: null, key: "effort", reviewer: "codex" }), { value: "medium", source: "workspace" });
   assert.deepEqual(resolveHere({ global: {}, workspace: null, skill: null, key: "model", reviewer: "agy" }), { value: null, source: "Antigravity default" });
+  assert.deepEqual(resolveHere({ global: {}, workspace: null, skill: null, key: "model", reviewer: "grok" }), { value: null, source: "Grok Build default" });
   assert.deepEqual(resolveHere({ global: {}, workspace: null, skill: null, key: "effort", reviewer: "agy" }), { value: "high", source: "default" });
   // a reviewer name from a file is a plain key, never a prototype member
   assert.deepEqual(resolveHere({ global, workspace: null, skill: null, key: "model", reviewer: "constructor" }).value, null);
@@ -261,5 +262,10 @@ test("effort levels: a model listed with none has no levels; the reviewer's own 
   assert.deepEqual(effortLevels(agy, "Fam A (High)"), ["low", "high"]);
   assert.equal(hasNoEfforts(agy, "Solo"), true);
   assert.deepEqual(effortLevels(null, "x", ["low", "max"]), ["low", "max"]);
+  // Grok: a listed model whose levels are not known (null) offers the fallback levels, and its effort stays on
+  const grok = [{ slug: "g-known", name: "g-known", efforts: ["none", "low"] }, { slug: "g-unknown", name: "g-unknown", efforts: null }];
+  assert.deepEqual(effortLevels(grok, "g-known", ["low", "max"]), ["none", "low"]);
+  assert.deepEqual(effortLevels(grok, "g-unknown", ["low", "max"]), ["low", "max"]);
+  assert.equal(hasNoEfforts(grok, "g-unknown"), false);
   assert.deepEqual(effortOptions({ catalog: null, model: null, saved: undefined, inherited: "i", fallback: ["low", "max"] }).map(o => o.value), ["", "low", "max"]);
 });

@@ -70,7 +70,7 @@ Training memory becomes stale and frequently hallucinates API signatures, versio
    - If dependencies are installed locally (e.g., `node_modules/`, `.venv/`), inspect their actual `.d.ts` type definitions, source exports, or run a one-liner (`node -e`, `python3 -c`, `npm view <pkg>`) to verify whether a method, option, or behavior exists in that version.
 2. **Tier 2 — Live Web Search & Documentation Lookup**:
    - Use your available internet/documentation tools whenever local inspection is insufficient or when checking current upstream documentation, RFCs/specs, deprecation notices, CVEs, breaking changes, or external capacity ceilings:
-     - **Native Web Tools**: `WebSearch` & `WebFetch` (Claude Code), `web_search` (Codex), `search_web` (Antigravity `agy`).
+     - **Native Web Tools**: `WebSearch` & `WebFetch` (Claude Code), `web_search` (Codex, Grok Build), `search_web` (Antigravity `agy`).
      - **Documentation MCP Tools (if connected)**: `mcp__context7__resolve-library-id` and `mcp__context7__query-docs`.
      - **Shell Network Lookups**: `curl -sL`, `npm view <pkg>`, `gh api`, `pip index versions`.
    - **Targeted Query Construction**: Include the exact library/platform name, version number, and symbol/method name in your search query (e.g., `"zod v4 z.Registry API documentation"` or `"OpenAI gpt-5 context window max_output_tokens"`).

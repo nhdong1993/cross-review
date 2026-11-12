@@ -562,7 +562,7 @@ function deniedHtml() {
 // ---------- model catalogs ----------
 
 const NO_CATALOG = { listModels: async () => null, defaultModel: () => null, cliInfo: async () => null };
-const CATALOG_CACHE_FILES = { codex: "models.json", agy: "models-agy.json" }; // Claude's list is fixed
+const CATALOG_CACHE_FILES = { codex: "models.json", agy: "models-agy.json", grok: "models-grok.json" }; // Claude's list is fixed
 
 const defaultCatalogCache = name => (CATALOG_CACHE_FILES[name] ? path.join(os.homedir(), ".cross-review", CATALOG_CACHE_FILES[name]) : null);
 

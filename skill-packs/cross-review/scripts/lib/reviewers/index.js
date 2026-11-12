@@ -1,5 +1,5 @@
 // Reviewer registry. A reviewer module exports: name, label, installHint, sandboxes,
-// defaultSandbox, fullAccessSandbox, isAvailable(), buildCommand({ threadId, workingDir, model, effort, sandbox, systemPromptFile, skillName }),
+// defaultSandbox, fullAccessSandbox, isAvailable(), buildCommand({ threadId, workingDir, model, effort, sandbox, systemPromptFile, skillName, promptFile }),
 // parseEvents(), activityItems() and newLogState()/foldLog()/logItems()/logOutcome() (the dashboard's
 // activity feed, read incrementally), matchesCmdline(). See codex.js.
 // Optional: encodePrompt(text) (what goes on stdin when the CLI does not read plain text),
@@ -10,8 +10,9 @@
 import * as agy from "./agy.js";
 import * as claude from "./claude.js";
 import * as codex from "./codex.js";
+import * as grok from "./grok.js";
 
-const REVIEWERS = { codex, claude, agy };
+const REVIEWERS = { codex, claude, agy, grok };
 
 export const DEFAULT_REVIEWER = "codex";
 export const REVIEWER_NAMES = Object.keys(REVIEWERS);

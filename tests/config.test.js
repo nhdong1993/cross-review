@@ -198,12 +198,14 @@ test("validate reviewers: unknown reviewer, unknown key, Claude effort, skills",
       codex: { model: "gpt-x", effort: "xhigh", skills: { "review-impl": { effort: "low" } } },
       claude: { model: "opus", effort: "max", skills: { "review-plan": { model: "sonnet", effort: "low" } } },
       agy: { model: "gemini-x-flash", effort: "medium" },
+      // Grok's levels depend on the model ("none" is one of grok-4.3's): any level name passes
+      grok: { model: "grok-4.6", effort: "none", skills: { "review-impl": { model: "grok-4.7", effort: "xhigh" } } },
     },
   }), []);
   // legacy keys next to reviewers stay valid
   assert.deepEqual(validateConfig({ model: "gpt-x", skills: { "review-pr": { effort: "low" } }, reviewers: { codex: { effort: "high" } } }), []);
   const bad = [
-    [{ reviewers: { gemini: { model: "m" } } }, 'reviewers: unknown reviewer "gemini" (known: codex, claude, agy)'],
+    [{ reviewers: { gemini: { model: "m" } } }, 'reviewers: unknown reviewer "gemini" (known: codex, claude, agy, grok)'],
     [{ reviewers: { codex: { colour: "red" } } }, /reviewers\.codex: unknown key "colour"/],
     [{ reviewers: { claude: { effort: "huge" } } }, "reviewers.claude.effort: must be one of low, medium, high, xhigh, max"],
     [{ reviewers: { claude: { skills: { "review-plan": { effort: "huge" } } } } }, /reviewers\.claude\.skills\.review-plan\.effort: must be one of/],

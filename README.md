@@ -81,6 +81,7 @@ Pick Codex or Claude Code when a missed bug costs more than a false alarm, Antig
   - `codex` ([Codex CLI](https://github.com/openai/codex), an OpenAI account or API key): the default reviewer
   - `claude` ([Claude Code](https://docs.anthropic.com/en/docs/claude-code))
   - `agy` ([Antigravity CLI](https://antigravity.google/docs))
+  - `grok` (xAI's Grok Build CLI: `curl -fsSL https://x.ai/cli/install.sh | bash`), signed in with `grok login` or with `XAI_API_KEY` set (see [Choosing the reviewer](#choosing-the-reviewer-optional)); macOS and Linux only
 - macOS, Linux or Windows. On Windows the reviewer CLIs may be `.exe` files or npm installs (`.cmd`), and the `cross-review` command works in PowerShell 7, cmd and Git Bash
 
 ## Install
@@ -134,7 +135,7 @@ Decision points: every regex, parser, guard, allow/deny list, default, fallback,
 ### Choosing the reviewer (optional)
 
 Codex reviews unless you choose another reviewer:
-- for one review, name it when you ask ("review this with Claude Code"); the skill passes `reviewer` (`codex`, `claude` or `agy`) to `review_begin`, and the session keeps it for every round;
+- for one review, name it when you ask ("review this with Claude Code"); the skill passes `reviewer` (`codex`, `claude`, `agy` or `grok`) to `review_begin`, and the session keeps it for every round;
 - as a default, set `"reviewer"` in `~/.cross-review/config.json` or `<workspace>/.cross-review/config.json`, or pick it in the dashboard's Settings.
 
 Each reviewer keeps its own model and effort under `reviewers.<name>`, so switching reviewers never hands one CLI another's model:
@@ -145,7 +146,8 @@ Each reviewer keeps its own model and effort under `reviewers.<name>`, so switch
   "reviewers": {
     "codex": { "model": "<codex model>", "effort": "high" },
     "claude": { "model": "opus", "effort": "max", "skills": { "review-pr": { "effort": "high" } } },
-    "agy": { "model": "<agy model family>", "effort": "low" }
+    "agy": { "model": "<agy model family>", "effort": "low" },
+    "grok": { "model": "<grok model>", "effort": "high" }
   }
 }
 ```
@@ -153,6 +155,7 @@ Each reviewer keeps its own model and effort under `reviewers.<name>`, so switch
 - **Codex**: the models `codex debug models` lists; effort as Codex names it.
 - **Claude Code**: the aliases (`opus`, `sonnet`, …) or a full model name; effort `low`, `medium`, `high`, `xhigh` or `max`.
 - **Antigravity**: `agy models` lists one model per effort (`<family>-low`, `<family>-high`, …). Pick the family and an effort, and the runner passes both to agy (`--model <family> --effort <level>`); a model listed without levels takes no effort. A level the family lacks fails before the review starts.
+- **Grok Build**: the models `grok models` lists, or any other model name (Other… in Settings; a custom model whose name has spaces cannot be saved in a settings file, so name it per review); pick one, because with an API key Grok's own default may be a model that does not reason. Effort levels depend on the model: Grok ignores the effort for a model that has none, and a wrong level or model name stops the turn with Grok's message. With an API key, `XAI_API_KEY` must be in the environment of the process that starts the review (the MCP server your agent runs, or the shell for the CLI); the runner passes its own environment on and stores no key. Every turn is billed to that key. Settings shows no sign-in state for Grok. Grok writes a command to its log when the command ends, so live activity shows it then, not when it starts. Reviews with Grok do not run on Windows yet: the reviewer prompt goes on the command line, which Windows limits to 32,767 characters.
 
 `model`, `effort` and `skills` at the top of a file are the older form of `reviewers.codex` and are still read that way; the dashboard saves them under `reviewers.codex`.
 

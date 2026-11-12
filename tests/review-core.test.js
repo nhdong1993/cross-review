@@ -21,6 +21,7 @@ import { followInDashboard } from "../skill-packs/cross-review/scripts/lib/dashb
 import { writeFakeCodex } from "./helpers/fake-codex.js";
 import { writeFakeClaude } from "./helpers/fake-claude.js";
 import { writeFakeAgy } from "./helpers/fake-agy.js";
+import { writeFakeGrok } from "./helpers/fake-grok.js";
 import * as codex from "../skill-packs/cross-review/scripts/lib/reviewers/codex.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -46,6 +47,7 @@ before(() => {
   writeFakeCodex(bin);
   writeFakeClaude(bin);
   writeFakeAgy(bin);
+  writeFakeGrok(bin);
   workDir = path.join(tmp, "work");
   fs.mkdirSync(workDir);
   logPath = path.join(tmp, "codex-log.jsonl");
@@ -57,6 +59,8 @@ before(() => {
   process.env.FAKE_CLAUDE_OUTPUT = path.join(tmp, "claude-output.md");
   process.env.FAKE_AGY_LOG = path.join(tmp, "agy-log.jsonl");
   process.env.FAKE_AGY_OUTPUT = path.join(tmp, "agy-output.md");
+  process.env.FAKE_GROK_LOG = path.join(tmp, "grok-log.jsonl");
+  process.env.FAKE_GROK_OUTPUT = path.join(tmp, "grok-output.md");
 });
 
 after(() => {
@@ -1056,6 +1060,119 @@ test("a failed agy turn (status ERROR) stops the round with its error", async ()
     delete process.env.FAKE_AGY_ERROR;
   }
 });
+
+// ---------- Grok Build as the reviewer ----------
+
+function grokCalls() {
+  const f = process.env.FAKE_GROK_LOG;
+  if (!fs.existsSync(f)) return [];
+  return fs.readFileSync(f, "utf8").trim().split("\n").filter(Boolean).map(l => JSON.parse(l));
+}
+
+/** Runs fn with a fake Grok that leaves a command open until it is stopped. */
+async function withHangingGrok(fn) {
+  process.env.FAKE_GROK_HANG = "1";
+  try {
+    return await fn();
+  } finally {
+    delete process.env.FAKE_GROK_HANG;
+  }
+}
+
+const grokLog = dir => fs.readFileSync(path.join(dir, "output.jsonl"), "utf8");
+
+test("grok reviewer round trip: prompt by --prompt-file, resumed by --resume, any model name", async () => {
+  fs.rmSync(process.env.FAKE_GROK_LOG, { force: true });
+  resetLog();
+  fs.writeFileSync(process.env.FAKE_GROK_OUTPUT, "### ISSUE-1: Something\n- Category: correctness\n- Severity: high\n- Problem: p\n\n### VERDICT\n- Status: REVISE\n- Reason: r\n");
+  const input1 = inputFor("review-impl", "g1");
+  // grok-unlisted is not in `grok models`: Grok decides, not the runner
+  const begun = await beginSession({ skill: "review-impl", mode: "working-tree", inputText: input1, workingDir: workDir, reviewer: "grok", model: "grok-unlisted", effort: "xhigh" });
+  const w1 = await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
+  assert.equal(w1.status, "completed");
+  assert.equal(w1.next, "respond");
+  assert.equal(w1.thread_id, "session-grok-1");
+  assert.equal(w1.review.blocks.length, 1);
+  const st = stateOf(begun.session_dir);
+  assert.deepEqual([st.reviewer, st.sandbox, st.model, st.effort], ["grok", "danger-full-access", "grok-unlisted", "xhigh"]);
+
+  fs.writeFileSync(process.env.FAKE_GROK_OUTPUT, "### VERDICT\n- Status: APPROVE\n- Reason: ok\n");
+  const input2 = inputFor("review-impl", "g2");
+  await replySession(begun.session_dir, { inputText: input2 });
+  const w2 = await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
+  assert.equal(w2.next, "done");
+
+  const calls = grokCalls();
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].prompt, renderExpected("review-impl", "working-tree-round1", input1));
+  assert.equal(calls[1].prompt, renderExpected("review-impl", "rebuttal-working-tree", input2));
+  assert.ok(!calls[0].args.includes("--resume"));
+  assert.equal(argAfter(calls[1].args, "--resume"), "session-grok-1");
+  for (const c of calls) {
+    assert.deepEqual(c.args.slice(0, 2), ["--output-format", "streaming-messages-json"]);
+    assert.equal(argAfter(c.args, "--prompt-file"), path.join(begun.session_dir, "prompt.txt"));
+    assert.deepEqual([argAfter(c.args, "-m"), argAfter(c.args, "--effort"), argAfter(c.args, "--sandbox")], ["grok-unlisted", "xhigh", "off"]);
+    assert.ok(c.args.includes("--always-approve"));
+    assert.ok(c.args.at(-1).startsWith("--system-prompt-override=# System Role: Autonomous Principal Technical Reviewer"), "the compiled prompt, last");
+    assert.equal(c.reviewerEnv, "grok");
+  }
+  assert.equal(codexCalls().length, 0, "Codex is not started for a Grok review");
+  const end = await endSession(begun.session_dir);
+  assert.equal(end.finalized, true);
+});
+
+test("a failed Grok turn (is_error with errors) stops the round with Grok's message", async () => {
+  fs.writeFileSync(process.env.FAKE_GROK_OUTPUT, "unused");
+  process.env.FAKE_GROK_ERROR = "Couldn't set model 'no-such-model': Invalid params: \"unknown model id\".";
+  try {
+    const begun = await beginSession({ skill: "review-plan", inputText: inputFor("review-plan", "gf"), workingDir: workDir, reviewer: "grok", model: "no-such-model" });
+    const w = await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
+    assert.equal(w.next, "stopped");
+    assert.match(w.error, /Grok Build turn failed: Couldn't set model 'no-such-model'/);
+    assert.equal(w.thread_id, "session-grok-1");
+    await endSession(begun.session_dir);
+  } finally {
+    delete process.env.FAKE_GROK_ERROR;
+  }
+});
+
+// Grok ends a turn it is told to stop with an error result, stop_reason "cancelled". Windows stops
+// the reviewer with taskkill /F, which gives it no chance to write that line.
+const NO_SIGTERM = process.platform === "win32" && "needs SIGTERM";
+
+test("a Grok turn stopped at the runner's deadline is a timeout that can be resumed", { skip: NO_SIGTERM }, () => withHangingGrok(async () => {
+  const begun = await beginSession({ skill: "review-plan", inputText: inputFor("review-plan", "gd"), workingDir: workDir, reviewer: "grok", timeout: 2 });
+  const st = stateOf(begun.session_dir);
+  await until(() => !aliveNow(st.pid), 20000, "reviewer exit");
+  assert.match(grokLog(begun.session_dir), /"stop_reason":"cancelled"/, "Grok wrote its cancelled result");
+  const w = await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
+  assert.deepEqual([w.status, w.recoverable, w.next, w.next_reason, w.thread_id], ["timeout", true, "stopped", "recoverable_timeout", "session-grok-1"]);
+  await endSession(begun.session_dir);
+}));
+
+test("a Grok turn cancelled from outside, with no deadline reached, is a failed turn", { skip: NO_SIGTERM }, () => withHangingGrok(async () => {
+  const begun = await beginSession({ skill: "review-plan", inputText: inputFor("review-plan", "gc"), workingDir: workDir, reviewer: "grok" });
+  const st = stateOf(begun.session_dir);
+  await until(() => grokLog(begun.session_dir).includes("sleep 97"), 10000, "the open command");
+  process.kill(st.pid, "SIGTERM");
+  await until(() => !aliveNow(st.pid), 10000, "reviewer exit");
+  const w = await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
+  assert.equal(w.status, "failed");
+  assert.match(w.error, /Grok Build turn failed: cancelled/);
+  await endSession(begun.session_dir);
+}));
+
+// The runner kills only a process it recognises, from `ps` output where arguments are not quoted
+test("end stops the Grok process of a workspace whose path has a quote in it", { skip: process.platform === "win32" && "no quote in Windows paths" }, () => withHangingGrok(async () => {
+  const ws = path.join(tmp, "odd\"name");
+  fs.mkdirSync(ws);
+  const begun = await beginSession({ skill: "review-plan", inputText: inputFor("review-plan", "gq"), workingDir: ws, reviewer: "grok" });
+  const st = stateOf(begun.session_dir);
+  await until(() => grokLog(begun.session_dir).includes("sleep 97"), 10000, "the open command");
+  assert.ok(aliveNow(st.pid));
+  await endSession(begun.session_dir);
+  await until(() => !aliveNow(st.pid), 10000, "reviewer stopped");
+}));
 
 // ---------- settings per reviewer ----------
 

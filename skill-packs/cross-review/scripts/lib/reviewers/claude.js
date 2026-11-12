@@ -82,10 +82,11 @@ function exitCodeOf(block) {
 
 /**
  * Read the event log. allLines gives the turn's terminal state and the review text;
- * newLines (not yet reported) give the activities, stamped with `elapsed`.
+ * newLines (not yet reported) give the activities, stamped with `elapsed`. `tools` names the
+ * CLI's tools (see CLAUDE_TOOLS): another CLI that writes this log shape passes its own.
  */
-export function parseEvents(allLines, newLines, elapsed) {
-  const state = foldLog(newLogState(), allLines);
+export function parseEvents(allLines, newLines, elapsed, tools = CLAUDE_TOOLS) {
+  const state = foldLog(newLogState(tools), allLines);
   const progressObserved = allLines.some(l => {
     const d = parseLine(l);
     return d && (d.type === "assistant" || d.type === "user");
@@ -95,17 +96,17 @@ export function parseEvents(allLines, newLines, elapsed) {
   const bashIds = new Set();
   for (const rawLine of allLines.slice(0, allLines.length - newLines.length)) {
     const d = parseLine(rawLine);
-    for (const c of contentOf(d)) if (c.type === "tool_use" && c.name === "Bash") bashIds.add(c.id);
+    for (const c of contentOf(d)) if (c.type === "tool_use" && tools.shell.has(c.name)) bashIds.add(c.id);
   }
   for (const rawLine of newLines) {
     const d = parseLine(rawLine);
     if (!d) continue;
     for (const c of contentOf(d)) {
       if (d.type === "assistant" && c.type === "tool_use") {
-        if (c.name === "Bash") {
+        if (tools.shell.has(c.name)) {
           bashIds.add(c.id);
           activities.push({ time: elapsed, type: "command_started", detail: (c.input && c.input.command) || "" });
-        } else if (FILE_TOOLS.has(c.name)) {
+        } else if (tools.files.has(c.name)) {
           activities.push({ time: elapsed, type: "file_change", detail: `${(c.input && c.input.file_path) || "?"} (${c.name})` });
         }
       } else if (d.type === "assistant" && c.type === "thinking" && c.thinking) {
@@ -119,11 +120,12 @@ export function parseEvents(allLines, newLines, elapsed) {
     }
   }
 
-  const { turnCompleted, turnFailed, failMessage, threadId, reviewText } = state;
-  return { turnCompleted, turnFailed, failMessage, threadId, reviewText, progressObserved, activities };
+  const { turnCompleted, turnFailed, failMessage, threadId, reviewText, cancelled } = state;
+  return { turnCompleted, turnFailed, failMessage, threadId, reviewText, progressObserved, activities, cancelled };
 }
 
-const FILE_TOOLS = new Set(["Edit", "Write", "NotebookEdit", "MultiEdit"]);
+/** Claude Code's tool names: the shell, the tools that change files, and a shell result's exit code. */
+const CLAUDE_TOOLS = { shell: new Set(["Bash"]), files: new Set(["Edit", "Write", "NotebookEdit", "MultiEdit"]), exitCode: exitCodeOf };
 
 /**
  * The turn's items for the dashboard, one per tool call or message block, in order of first
@@ -133,14 +135,15 @@ export function activityItems(lines) {
   return logItems(foldLog(newLogState(), lines));
 }
 
-export function newLogState() {
+export function newLogState(tools = CLAUDE_TOOLS) {
   return {
-    count: 0, byId: new Map(), lastMessageId: null,
-    turnCompleted: false, turnFailed: false, failMessage: "", threadId: "", reviewText: "",
+    count: 0, byId: new Map(), lastMessageId: null, tools,
+    turnCompleted: false, turnFailed: false, failMessage: "", threadId: "", reviewText: "", cancelled: false,
   };
 }
 
 export function foldLog(state, lines) {
+  const { tools } = state;
   for (const rawLine of lines) {
     const index = state.count++;
     const d = parseLine(rawLine);
@@ -150,6 +153,8 @@ export function foldLog(state, lines) {
       if (d.is_error === true) {
         state.turnFailed = true;
         state.failMessage = failMessageOf(d);
+        // the CLI was stopped mid-turn (Grok on SIGTERM); the runner decides whether that was its own deadline
+        state.cancelled = d.stop_reason === "cancelled";
       } else {
         state.turnCompleted = true;
         state.reviewText = typeof d.result === "string" ? d.result : "";
@@ -163,9 +168,9 @@ export function foldLog(state, lines) {
         let entry;
         if (c.type === "tool_use") {
           const input = c.input || {};
-          if (c.name === "Bash") entry = { kind: "command", command: input.command || "", exitCode: null, status: "in_progress" };
-          else if (FILE_TOOLS.has(c.name)) entry = { kind: "file_change", path: input.file_path || input.notebook_path || "", status: "in_progress" };
-          else entry = { kind: "tool", tool: c.name || "tool", text: input.file_path || input.pattern || input.url || input.query || "", status: "in_progress" };
+          if (tools.shell.has(c.name)) entry = { kind: "command", command: input.command || "", exitCode: null, status: "in_progress" };
+          else if (tools.files.has(c.name)) entry = { kind: "file_change", path: input.file_path || input.notebook_path || "", status: "in_progress" };
+          else entry = { kind: "tool", tool: c.name || "tool", text: input.file_path || input.target_file || input.pattern || input.url || input.query || "", status: "in_progress" };
           entry.id = c.id || `${msgId}:${i}`;
         } else if (c.type === "text" && c.text) {
           entry = { kind: "message", text: c.text, id: `${msgId}:${i}` };
@@ -184,7 +189,7 @@ export function foldLog(state, lines) {
         if (!entry) continue;
         entry.lastLine = index;
         entry.status = c.is_error ? "failed" : "completed";
-        if (entry.kind === "command") entry.exitCode = exitCodeOf(c);
+        if (entry.kind === "command") entry.exitCode = tools.exitCode(c);
       }
     }
   }

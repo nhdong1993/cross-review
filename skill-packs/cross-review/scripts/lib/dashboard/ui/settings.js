@@ -6,7 +6,7 @@ export const SKILLS = ["review-plan", "review-impl", "review-think", "review-pr"
 /** Efforts offered when the model catalog is unavailable. */
 export const FALLBACK_EFFORTS = ["low", "medium", "high", "xhigh"];
 export const OTHER = "__other__";
-export const REVIEWERS = { codex: "Codex", claude: "Claude Code", agy: "Antigravity" };
+export const REVIEWERS = { codex: "Codex", claude: "Claude Code", agy: "Antigravity", grok: "Grok Build" };
 export const DEFAULT_REVIEWER = "codex";
 
 const opt = (value, label, selected) => ({ value, label, selected: Boolean(selected) });
@@ -31,10 +31,10 @@ function findModel(catalog, model) {
   return catalog.find(x => x.slug === model) || catalog.find(x => x.name === model || x.name === bare) || null;
 }
 
-/** Levels the model supports (the fallback list without a catalog entry). */
+/** Levels the model supports (the fallback list without a catalog entry, or when its levels are not known: Grok). */
 export function effortLevels(catalog, model, fallback = FALLBACK_EFFORTS) {
   const m = findModel(catalog, model);
-  return m && m.efforts.length ? m.efforts : fallback;
+  return m && Array.isArray(m.efforts) && m.efforts.length ? m.efforts : fallback;
 }
 
 /** The catalog lists the model with no effort levels (an agy model that has none). */

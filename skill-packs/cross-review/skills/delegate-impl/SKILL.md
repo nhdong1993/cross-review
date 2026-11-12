@@ -1,6 +1,6 @@
 ---
 name: delegate-impl
-description: Hand one implementation task to an external CLI (Codex by default; Claude Code or Antigravity on request) that edits files in a working directory you give it, reports what it changed, and answers change requests. You write the brief, verify the real diff against the report, and review the result. Use for self-contained tasks you want done by another model, or for several tasks in parallel, each in its own git worktree.
+description: Hand one implementation task to an external CLI (Codex by default; Claude Code, Antigravity or Grok Build on request) that edits files in a working directory you give it, reports what it changed, and answers change requests. You write the brief, verify the real diff against the report, and review the result. Use for self-contained tasks you want done by another model, or for several tasks in parallel, each in its own git worktree.
 ---
 
 # Delegated Implementation
@@ -45,7 +45,7 @@ The runner keeps all session state; you supply content and follow `next`.
 - **Input.** One markdown string of placeholder values: `NAME: value` lines first (optionally
   between `---` lines), then one `## NAME` section per multi-line value.
 - **Start:** `delegate_begin {input, working_dir, reviewer?, model?, effort?}`.
-- **Who does the work.** Pass `reviewer` (`codex`, `claude` for Claude Code, `agy` for Antigravity),
+- **Who does the work.** Pass `reviewer` (`codex`, `claude` for Claude Code, `agy` for Antigravity, `grok` for Grok Build),
   `model` or `effort` only when the user names one; otherwise omit them and the settings decide
   (workspace, then global), else Codex with its default model and effort `high`. Never choose one
   from the size of the task. The session keeps them for every round.
@@ -90,7 +90,7 @@ decide, with the user, what to commit.
 ## Rules
 - If in plan mode, exit plan mode first; this skill changes code through another CLI.
 - **The implementer is not sandboxed.** It runs with the same full access a reviewer gets
-  (Codex `danger-full-access`; Claude Code and agy `--dangerously-skip-permissions`), so "never
+  (Codex `danger-full-access`; Claude Code and agy `--dangerously-skip-permissions`; Grok `--sandbox off --always-approve`), so "never
   commit", "never push" and `SCOPE_LIMITS` are instructions it follows, not a boundary that stops
   it. The checks above catch what a diff can show — an out-of-scope file, a new commit, a switched
   branch — but nothing here can undo a push or a write outside the repository. Delegate only to a

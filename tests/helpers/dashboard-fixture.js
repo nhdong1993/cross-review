@@ -291,9 +291,10 @@ export function buildFixture(root, { now = Math.floor(Date.now() / 1000), livePi
 }
 
 /**
- * One workspace ("lantern") whose finished reviews ran on Claude Code and Antigravity: a
- * Claude Code review on its default model, an agy review on a model with no effort levels
- * ("solo-y") and one on agy's default model. Invented data, like the rest.
+ * One workspace ("lantern") whose finished reviews ran on Claude Code, Antigravity and Grok Build:
+ * a Claude Code review on its default model, an agy review on a model with no effort levels
+ * ("solo-y"), one on agy's default model, and a Grok review on a model whose levels are not
+ * known ("g-unknown"). Invented data, like the rest.
  */
 export function buildReviewerFixture(root, { now = Math.floor(Date.now() / 1000) } = {}) {
   const lantern = path.join(root, "lantern");
@@ -314,6 +315,11 @@ export function buildReviewerFixture(root, { now = Math.floor(Date.now() / 1000)
     skill: "review-impl", mode: "working-tree", reviewer: "agy", created: now - 7000, meta: "APPROVE", inputs: ["## USER_REQUEST\nLight the lamp at dusk.\n"],
     state: { ended_at: now - 6800, end_outcome: "finalized", model: null, effort: "low" },
     rounds: done(now - 7000, verdict("APPROVE", "Looks right.")),
+  });
+  s.grok = writeSession(sess, "review-impl-20261016-003", {
+    skill: "review-impl", mode: "working-tree", reviewer: "grok", created: now - 6000, meta: "APPROVE", inputs: ["## USER_REQUEST\nTrim the wick.\n"],
+    state: { ended_at: now - 5800, end_outcome: "finalized", model: "g-unknown", effort: "xhigh" },
+    rounds: done(now - 6000, verdict("APPROVE", "Looks right.")),
   });
   return { root, workspace: lantern, sessions: s };
 }

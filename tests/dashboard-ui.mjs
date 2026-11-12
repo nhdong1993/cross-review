@@ -64,6 +64,15 @@ const catalogs = {
     defaultModel: () => "Fam X (High)",
     cliInfo: async () => ({ version: "agy 9.9.9-invented", loggedIn: null }),
   },
+  // Grok lists model ids and takes any other name; the levels of one model are not known
+  grok: {
+    listModels: async () => [
+      { slug: "g-known", name: "g-known", description: "", efforts: ["none", "low", "high"] },
+      { slug: "g-unknown", name: "g-unknown", description: "", efforts: null },
+    ],
+    defaultModel: () => null,
+    cliInfo: async () => ({ version: "grok 9.9.9 (invented)", loggedIn: null }),
+  },
 };
 const d = await startDashboard({ root, port: 0, open: false, discoveryFile: null, catalogs });
 // Settings save as they change; this note says when every save is done
@@ -293,7 +302,7 @@ try {
 
   // ---------- settings ----------
   await page.evaluate(`location.hash = "#/settings"`);
-  await page.waitFor(`document.querySelectorAll("#per-skill tr").length === 4 && document.querySelectorAll("#avatars tr").length >= 2`);
+  await page.waitFor(`document.querySelectorAll("#per-skill tr").length === 5 && document.querySelectorAll("#avatars tr").length >= 2`);
   const set = await page.evaluate(`({
     follow: !!document.querySelector(".form #f-follow"),
     buttons: [...document.querySelectorAll("#settings button")].map(b => b.id),
@@ -491,7 +500,7 @@ try {
   // without levels turns the effort off. Each lands under reviewers.<name> in the file, and
   // Codex's entry stays as it was
   await page.evaluate(`location.hash = "#/settings"`);
-  await page.waitFor(`document.getElementById("preview-title").textContent === "Show ~/.cross-review/config.json" && document.querySelectorAll("#f-reviewer-set option").length === 3`);
+  await page.waitFor(`document.getElementById("preview-title").textContent === "Show ~/.cross-review/config.json" && document.querySelectorAll("#f-reviewer-set option").length === 4`);
   const readGlobal = () => JSON.parse(fs.readFileSync(globalFile, "utf8"));
   const untilFile = async check => {
     for (let i = 0; i < 50 && !check(readGlobal()); i++) await new Promise(r => setTimeout(r, 100));
@@ -499,7 +508,7 @@ try {
   };
   const change = (sel, value) => page.evaluate(`(() => { const e = document.querySelector(${JSON.stringify(sel)}); e.value = ${JSON.stringify(value)}; e.dispatchEvent(new Event("change", { bubbles: true })); })()`);
   const codexBefore = readGlobal().reviewers.codex;
-  assert.deepEqual(await page.evaluate(`[...document.querySelectorAll("#f-reviewer-set option")].map(o => o.textContent)`), ["Codex", "Claude Code", "Antigravity"]);
+  assert.deepEqual(await page.evaluate(`[...document.querySelectorAll("#f-reviewer-set option")].map(o => o.textContent)`), ["Codex", "Claude Code", "Antigravity", "Grok Build"]);
   assert.equal(await page.evaluate(`document.getElementById("f-target").value`), "codex");
   await change("#f-reviewer-set", "claude");
   const claudeForm = await page.evaluate(`({
@@ -544,6 +553,28 @@ try {
   assert.equal(await page.evaluate(`document.getElementById("effort-help").textContent`), "This model has no effort levels.");
   file = await untilFile(f => f.reviewers.agy && f.reviewers.agy.model === "solo-y");
   assert.equal(file.reviewers.agy.model, "solo-y");
+  // Grok: a list plus Other…; a model whose levels are not known keeps the effort on, with the usual levels
+  await change("#f-target", "grok");
+  await page.waitFor(`document.querySelector("#f-model-set").dataset.path === "reviewers.grok.model"`);
+  const grokForm = () => page.evaluate(`({
+    help: document.getElementById("reviewer-help").textContent,
+    modelHelp: document.getElementById("model-help").textContent,
+    options: [...document.querySelectorAll("#f-model-set option")].map(o => o.value),
+    efforts: [...document.querySelectorAll("#f-effort-set option")].map(o => o.value),
+    disabled: document.getElementById("f-effort-set").disabled,
+  })`);
+  let gf = await grokForm();
+  assert.match(gf.modelHelp, /^Listed by grok models, .* Pick Other… for any other model name\.$/);
+  assert.deepEqual(gf.options, ["", "g-known", "g-unknown", "__other__"]);
+  await change("#f-model-set", "g-known");
+  await page.waitFor(`document.querySelectorAll("#f-effort-set option").length === 4`);
+  assert.deepEqual((await grokForm()).efforts, ["", "none", "low", "high"]);
+  await change("#f-model-set", "g-unknown");
+  await page.waitFor(`document.querySelectorAll("#f-effort-set option").length === 5`);
+  gf = await grokForm();
+  assert.deepEqual([gf.efforts, gf.disabled], [["", "low", "medium", "high", "xhigh"], false]);
+  file = await untilFile(f => f.reviewers.grok && f.reviewers.grok.model === "g-unknown");
+  assert.equal(file.reviewers.grok.model, "g-unknown");
   // back to Codex: the default reviewer leaves the key out, and the form shows Codex again
   await change("#f-reviewer-set", "codex");
   file = await untilFile(f => !Object.hasOwn(f, "reviewer"));
@@ -559,10 +590,10 @@ try {
   const rvPage = await browser.newPage(1400, 1200);
   try {
     await rvPage.goto(`${dR.url}#/`);
-    await rvPage.waitFor(`document.querySelectorAll("#history tr[data-go]").length === 3`);
+    await rvPage.waitFor(`document.querySelectorAll("#history tr[data-go]").length === 4`);
     await rvPage.waitFor(`/Fam X \\(High\\) · Antigravity default/.test(document.getElementById("history").textContent)`);
     const models = await rvPage.evaluate(`[...document.querySelectorAll("#history tr[data-go]")].map(tr => tr.children[4].textContent)`);
-    assert.deepEqual(models, ["Fam X (High) · Antigravity default", "solo-y", "Claude Code default"]);
+    assert.deepEqual(models, ["g-unknown", "Fam X (High) · Antigravity default", "solo-y", "Claude Code default"]);
     const facts = async id => {
       await rvPage.evaluate(`location.hash = "#/s/lantern/${id}"`);
       await rvPage.waitFor(`document.querySelector("#thread .mark.rv img") && document.getElementById("f-reviewer").textContent !== ""`);
@@ -578,10 +609,11 @@ try {
     // the model's name and its missing levels come with agy's list, loaded in the background
     await rvPage.waitFor(`document.getElementById("f-model").textContent === "Solo Y"`);
     assert.deepEqual(await facts(path.basename(rvFx.sessions.agySolo)), { reviewer: "Antigravity", model: "Solo Y", effort: "—", letters: "AG" });
+    assert.deepEqual(await facts(path.basename(rvFx.sessions.grok)), { reviewer: "Grok Build", model: "g-unknown", effort: "xhigh", letters: "GK" });
     await rvPage.evaluate(`location.hash = "#/settings"`);
-    await rvPage.waitFor(`document.querySelectorAll("#avatars tr").length >= 3`);
+    await rvPage.waitFor(`document.querySelectorAll("#avatars tr").length >= 4`);
     const parties = await rvPage.evaluate(`[...document.querySelectorAll("#avatars tr")].map(tr => [tr.querySelector("img").getAttribute("alt"), tr.children[0].textContent])`);
-    assert.deepEqual(parties.filter(([, label]) => label.startsWith("Reviewer")), [["CC", "Reviewer · Claude Code"], ["AG", "Reviewer · Antigravity"]]);
+    assert.deepEqual(parties.filter(([, label]) => label.startsWith("Reviewer")), [["CC", "Reviewer · Claude Code"], ["AG", "Reviewer · Antigravity"], ["GK", "Reviewer · Grok Build"]]);
   } finally {
     await dR.close();
   }
@@ -769,7 +801,7 @@ async function settingsAtOnceChecks(browser) {
       await fresh.evaluate(holdLoad);
       await fresh.evaluate(`location.hash = "#/settings"`);
       await fresh.waitFor(`typeof window.releaseLoad === "function"`);
-      assert.equal(await fresh.evaluate(`document.querySelectorAll("#per-skill tr").length`), 4, "the form is filled while the load is held");
+      assert.equal(await fresh.evaluate(`document.querySelectorAll("#per-skill tr").length`), 5, "the form is filled while the load is held");
       assert.equal(await fresh.evaluate(`document.getElementById("preview-title").textContent`), "Show ~/.cross-review/config.json");
       assert.match(await fresh.evaluate(`document.getElementById("preview").textContent`), new RegExp(`"effort": "${beforeEffort}"`));
       assert.ok(await fresh.evaluate(`${options}.includes("Model A")`));
@@ -999,7 +1031,8 @@ async function plansChecks(browser) {
     assert.match(doc.prog, /—\s*not a loop-plan file/);
     assert.equal(doc.review.trim(), "—");
     assert.equal(row("notes.md").st, "document");
-    // filters: state, and words only in the Target, only in a phase name, only in a document's body
+    // filters: state, and words only in the Target or only in a phase name; a document's body is not
+    // searched, only its title and section titles
     const count = async (state, q) => page.evaluate(`(() => {
       const s = document.getElementById("pf-state"); s.value = ${JSON.stringify(state)}; s.dispatchEvent(new Event("change"));
       const q = document.getElementById("pf-search"); q.value = ${JSON.stringify(q)}; q.dispatchEvent(new Event("input"));
@@ -1009,7 +1042,7 @@ async function plansChecks(browser) {
     assert.deepEqual((await count("doc", "")).sort(), ["notes.md", "sync notes.md", "untitled.md"]);
     assert.deepEqual(await count("", "toolbar"), ["export-formats-plan.md"]);
     assert.deepEqual(await count("", "streaming"), ["export-formats-plan.md"]);
-    assert.deepEqual(await count("", "paragraph"), ["sync notes.md"]);
+    assert.deepEqual(await count("", "paragraph"), []);
     await count("", "");
     await page.screenshot(path.join(shots, "plans-1400.png"));
 

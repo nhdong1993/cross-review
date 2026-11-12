@@ -136,7 +136,7 @@ test("review-impl covers commit ranges and own PRs; review-pr reviews other peop
 
 test("reviewer, model and effort come from the user, the checkpoint or the dashboard settings; no skill asks for or sizes them", () => {
   const core = fs.readFileSync(path.join(PACK, "shared", "protocol", "core.md"), "utf8");
-  assert.ok(core.includes("Pass `reviewer` (`codex`, `claude` for Claude Code, or `agy` for Antigravity), `model` or `effort` only when the user names one or the plan's review checkpoint does; otherwise omit them, without asking the user which reviewer to use, and the runner applies the dashboard settings (workspace, then global), else Codex with its default model and effort `high`."), "core rule");
+  assert.ok(core.includes("Pass `reviewer` (`codex`, `claude` for Claude Code, `agy` for Antigravity, or `grok` for Grok Build), `model` or `effort` only when the user names one or the plan's review checkpoint does; otherwise omit them, without asking the user which reviewer to use, and the runner applies the dashboard settings (workspace, then global), else Codex with its default model and effort `high`."), "core rule");
   assert.ok(core.includes("Do not pick a reviewer, model or effort from the size of the diff or the question."), "no sizing");
   assert.ok(core.includes("review_begin {skill, mode?, input, working_dir, reviewer?, model?, effort?}") && core.includes("[--reviewer R]"), "both shells name the reviewer");
   assert.ok(!core.includes("Omit `effort` (the runner uses `high`)"), "old rule gone");
