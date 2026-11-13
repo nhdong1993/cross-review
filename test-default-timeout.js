@@ -82,6 +82,12 @@ try {
     `default timeout = ${state.timeout}, expected ${EXPECTED_TIMEOUT_SECONDS}`,
   );
 
+  // stop right after start must still end the reviewer: a `#!/usr/bin/env node` CLI is `env node …` at first
+  run("stop", [sessionDir]);
+  let alive = true;
+  try { process.kill(state.pid, 0); } catch { alive = false; }
+  assert(!alive, `reviewer ${state.pid} is still running after stop`);
+
   console.log(`PASS: default timeout is ${EXPECTED_TIMEOUT_SECONDS}s (5h)`);
 } finally {
   cleanup();

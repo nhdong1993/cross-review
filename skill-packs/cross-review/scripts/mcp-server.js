@@ -78,7 +78,7 @@ function createServer() {
   server.registerTool("review_begin", {
     title: "Begin a review",
     annotations: ANNOTATIONS,
-    description: "Start a review session: render round 1 for the skill and launch the reviewer in the background. Returns session_dir; peer skills (review-think, review-pr) also return analysis_prompt for the orchestrator's independent analysis. When the user turned on Follow reviews in the dashboard, also dashboard_url (the session's live page; you may give it to the user) or dashboard_error (the review runs anyway).",
+    description: "Start a review session: render round 1 for the skill and start the reviewer. Returns at once with session_dir and next: running; nothing notifies you when the reviewer finishes, so call review_wait until next is not running before you end your turn. Peer skills (review-think, review-pr) also return analysis_prompt for the orchestrator's independent analysis. When the user turned on Follow reviews in the dashboard, also dashboard_url (the session's live page; you may give it to the user) or dashboard_error (the review runs anyway).",
     inputSchema: {
       skill: z.enum(SKILLS),
       mode: z.string().optional().describe("review-impl: working-tree | branch"),
@@ -104,7 +104,7 @@ function createServer() {
   server.registerTool("review_wait", {
     title: "Wait for the current review round",
     annotations: ANNOTATIONS,
-    description: `Wait up to max_wait_seconds (default ${DEFAULT_WAIT_S}) for the reviewer. Returns the round status, parsed review, activities, and next: running (call again), respond (reply), cross_check (peer skills: compare with your analysis, then reply or end with an outcome), done (end), ask_user, or stopped.`,
+    description: `Wait up to max_wait_seconds (default ${DEFAULT_WAIT_S}) for the reviewer. Returns the round status, parsed review, activities, and next: running (call again; do not end your turn while it is running, nothing notifies you when the reviewer finishes), respond (reply), cross_check (peer skills: compare with your analysis, then reply or end with an outcome), done (end), ask_user, or stopped.`,
     inputSchema: {
       session_dir: z.string(),
       max_wait_seconds: z.number().int().min(0).optional(),
@@ -114,7 +114,7 @@ function createServer() {
   server.registerTool("review_reply", {
     title: "Send the next review round",
     annotations: ANNOTATIONS,
-    description: "Render the skill's next-round template from the input and resume the reviewer thread. Model and effort default to the session's stored values.",
+    description: "Render the skill's next-round template from the input and resume the reviewer thread. Returns at once with next: running; nothing notifies you when the reviewer finishes, so call review_wait until next is not running before you end your turn. Model and effort default to the session's stored values.",
     inputSchema: {
       session_dir: z.string(),
       input: z.string().describe(INPUT_HELP),
@@ -140,7 +140,7 @@ function createServer() {
   server.registerTool("delegate_begin", {
     title: "Delegate an implementation task",
     annotations: WRITES,
-    description: `Hand one implementation task to another CLI (${DEFAULT_REVIEWER} by default). The CLI EDITS FILES in working_dir with full access, then reports what it changed; it is told never to commit, push or switch branches. Give parallel tasks their own git worktree. Poll with review_wait and close with review_end. Returns session_dir, and dashboard_url/dashboard_error when Follow reviews is on.`,
+    description: `Hand one implementation task to another CLI (${DEFAULT_REVIEWER} by default). The CLI EDITS FILES in working_dir with full access, then reports what it changed; it is told never to commit, push or switch branches. Give parallel tasks their own git worktree. Returns at once with session_dir and next: running; nothing notifies you when the CLI finishes, so call review_wait until next is not running before you end your turn, then close with review_end. Also returns dashboard_url/dashboard_error when Follow reviews is on.`,
     inputSchema: {
       input: z.string().describe(INPUT_HELP),
       working_dir: z.string().describe("Absolute path of the repository the CLI may edit"),
@@ -163,7 +163,7 @@ function createServer() {
   server.registerTool("delegate_reply", {
     title: "Send change requests to the implementer",
     annotations: WRITES,
-    description: "Render the revision round from the input and resume the implementer's thread; it EDITS FILES again. Use after reading the real diff. Model and effort default to the session's stored values.",
+    description: "Render the revision round from the input and resume the implementer's thread; it EDITS FILES again. Use after reading the real diff. Returns at once with next: running; nothing notifies you when the CLI finishes, so call review_wait until next is not running before you end your turn. Model and effort default to the session's stored values.",
     inputSchema: {
       session_dir: z.string(),
       input: z.string().describe(INPUT_HELP),

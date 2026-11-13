@@ -110,6 +110,8 @@ test("codex matchesCmdline: only `exec` turns of codex, codex.exe or a node-host
   for (const yes of [
     "codex exec --skip-git-repo-check --json --sandbox danger-full-access -C /w",
     "node /opt/homebrew/bin/codex exec --json",
+    // a `#!/usr/bin/env node` script shows this for a moment after it starts
+    "/usr/bin/env node /x/bin/codex exec --json",
     "C:\\tools\\codex.exe exec --json",
     "\"C:\\Program Files\\nodejs\\node.exe\" \"C:\\Users\\x y\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js\" exec --json resume t -",
   ]) assert.equal(codex.matchesCmdline(yes), true, yes);
@@ -119,11 +121,17 @@ test("codex matchesCmdline: only `exec` turns of codex, codex.exe or a node-host
     "code.exe C:\\x\\codex.md exec",
     "vim codex exec",
     "codex-helper exec --json",
+    "/usr/bin/env node /x/bin/codex login status",
+    "/usr/bin/env node /x/bin/codex-helper exec --json",
   ]) assert.equal(codex.matchesCmdline(no), false, no);
 });
 
-test("computeNext: running", () => {
-  assert.equal(computeNext({ status: "running" }, PLAN).next, "running");
+test("computeNext: running tells the caller to keep waiting", () => {
+  const r = computeNext({ status: "running" }, PLAN);
+  assert.equal(r.next, "running");
+  assert.equal(r.next_reason, "reviewer_running");
+  assert.match(r.next_action, /nothing notifies you/);
+  assert.match(r.next_action, /review_wait/);
 });
 
 test("computeNext: APPROVE ends a plan review", () => {
@@ -205,6 +213,26 @@ test("parseReviewInput: CRLF input parses like LF", () => {
   assert.deepEqual(v, { PLAN_PATH: "/tmp/plan.md", USER_REQUEST: "Review this plan\nline 2" });
 });
 
+// ---------- poll: a reviewer this process may not signal ----------
+
+test("poll: a reviewer pid that answers EPERM is alive, not an unexpected exit", t => {
+  // pid 1 exists everywhere on POSIX and refuses signals from an ordinary user, as a reviewer
+  // started outside a sandbox does for a `wait` run inside one
+  let code = null;
+  try { process.kill(1, 0); } catch (e) { code = e.code; }
+  if (code !== "EPERM") return t.skip(`signal 0 to pid 1 gives ${code || "no error"} here`);
+  const dir = fs.mkdtempSync(path.join(tmp, "eperm-"));
+  const out = execFileSync(process.execPath, [RUNNER, "init", "--skill-name", "review-plan", "--working-dir", dir], { encoding: "utf8" });
+  const sessionDir = out.trim().slice("SESSION:".length);
+  const stateFile = path.join(sessionDir, "state.json");
+  const now = Math.floor(Date.now() / 1000);
+  const state = { ...JSON.parse(fs.readFileSync(stateFile, "utf8")), round: 1, pid: 1, pgid: 0, watchdog_pid: 0, started_at: now, timeout: 18000 };
+  fs.writeFileSync(stateFile, JSON.stringify(state));
+  fs.writeFileSync(path.join(sessionDir, "rounds.json"), JSON.stringify([{ round: 1, status: "running", started_at: now }]));
+  const poll = JSON.parse(execFileSync(process.execPath, [RUNNER, "poll", sessionDir, "--min-interval", "0"], { encoding: "utf8" }));
+  assert.equal(poll.status, "running", JSON.stringify(poll));
+});
+
 // ---------- .gitignore ----------
 
 test("init writes .cross-review/.gitignore once and never overwrites it", () => {
@@ -238,6 +266,9 @@ for (const combo of COMBOS) {
     const begun = await beginSession({ skill: combo.skill, mode: combo.mode, inputText: input1, workingDir: workDir, model: "model-a", effort: "low" });
     assert.equal(begun.status, "running");
     assert.equal(begun.round, 1);
+    // begin returns at once: the result itself says a round is running and what to do about it
+    const running = computeNext({ status: "running" });
+    assert.deepEqual({ next: begun.next, next_reason: begun.next_reason, next_action: begun.next_action }, running);
     if (combo.peer) {
       assert.equal(begun.analysis_prompt, renderExpected(combo.skill, combo.templates.analysis, input1));
     } else {
@@ -247,12 +278,16 @@ for (const combo of COMBOS) {
     const w1 = await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
     assert.equal(w1.status, "completed");
     assert.equal(w1.next, combo.peer ? "cross_check" : "respond");
+    assert.ok(!("next_action" in w1), "a finished round carries no waiting instruction");
 
     const input2 = inputFor(combo.skill, "r2");
     const replied = await replySession(begun.session_dir, { inputText: input2, expectedKind: skillKind(combo.skill) });
     assert.equal(replied.round, 2);
+    assert.equal(replied.status, "started");
+    assert.deepEqual({ next: replied.next, next_reason: replied.next_reason, next_action: replied.next_action }, running);
     const w2 = await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
     assert.equal(w2.status, "completed");
+    assert.ok(!("next_action" in w2));
 
     const calls = codexCalls();
     assert.equal(calls.length, 2);
@@ -408,6 +443,7 @@ test("wait returns activities from polls made before its deadline", async () => 
     await new Promise(r => setTimeout(r, 500));
     const w1 = await waitSession(begun.session_dir, { maxWaitSeconds: 1 });
     assert.equal(w1.status, "running");
+    assert.equal(w1.next_action, computeNext({ status: "running" }).next_action);
     assert.ok(w1.activities.length > 0, "activities from the in-call poll are returned");
     const w2 = await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
     assert.equal(w2.status, "completed");

@@ -330,7 +330,7 @@ async function register(sessionDir) {
 
 /**
  * Start a review: init the session, render round 1, launch the reviewer (default codex).
- * Returns { session_dir, round: 1, status: "running", analysis_prompt?, dashboard_url? | dashboard_error? }.
+ * Returns { session_dir, round: 1, status: "running", next: "running", next_reason, next_action, analysis_prompt?, dashboard_url? | dashboard_error? }.
  * Reviewer, model and effort not passed come from the config (workspace, then global);
  * `caller` ({name, title?, version?}, from the MCP client) is stored for the dashboard.
  */
@@ -367,7 +367,7 @@ export async function beginSession({ skill, mode, inputText, inputFile, workingD
   await runnerJson(startArgs, prompt, "START_FAILED");
   writeRoundInput(sessionDir, 1, raw);
 
-  const out = { session_dir: sessionDir, round: 1, status: "running" };
+  const out = { session_dir: sessionDir, round: 1, status: "running", ...RUNNING };
   if (analysisPrompt !== null) out.analysis_prompt = analysisPrompt;
   if (settings.open_dashboard === true) Object.assign(out, await follow(sessionDir));
   else await register(sessionDir);
@@ -379,13 +379,20 @@ function roundStatus(review) {
   return (review.verdict && review.verdict.status) || review.suggested_status || null;
 }
 
+// begin and reply return at once and the reviewer runs detached: nothing wakes a caller that ends its turn
+const RUNNING = {
+  next: "running",
+  next_reason: "reviewer_running",
+  next_action: "This round is still running and nothing notifies you when it ends. Do not end your turn before review_wait (CLI: wait) returns a next other than running, unless a background `wait` command your client tracks will wake you.",
+};
+
 /**
  * Decide the orchestrator's next step from a poll result.
- * Returns { next, next_reason }.
+ * Returns { next, next_reason }, plus next_action while the round is running.
  */
 export function computeNext(pollJson, state = {}) {
   const status = pollJson && pollJson.status;
-  if (status === "running") return { next: "running", next_reason: "reviewer_running" };
+  if (status === "running") return { ...RUNNING };
 
   if (status === "completed") {
     const review = pollJson.review || null;
@@ -501,7 +508,8 @@ export async function replySession(sessionDir, { inputText, inputFile, model, ef
   updateState(sessionDir, { ended_at: null, end_outcome: null, ...(model || effort ? { settings_sources: sources } : {}) });
   // a dashboard restarted since `begin` lists this workspace again
   await register(sessionDir);
-  return result;
+  // the runner's own status ("started") stays; computeNext would read it as a stopped round
+  return { ...result, ...RUNNING };
 }
 
 /**

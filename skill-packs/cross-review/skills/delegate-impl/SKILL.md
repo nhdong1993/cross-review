@@ -49,8 +49,13 @@ The runner keeps all session state; you supply content and follow `next`.
   `model` or `effort` only when the user names one; otherwise omit them and the settings decide
   (workspace, then global), else Codex with its default model and effort `high`. Never choose one
   from the size of the task. The session keeps them for every round.
-- **Wait:** `review_wait {session_dir}` until `next` is not `running`. Report the specific
-  `activities` (e.g. "implementer: editing src/auth.js"), never just "running".
+- **Wait:** `delegate_begin` and `delegate_reply` return at once and nothing notifies you when the
+  implementer finishes, so do not end your turn while a round is running: call
+  `review_wait {session_dir}` (CLI: `wait <session_dir>`) until `next` is not `running`. To do other
+  work meanwhile or drive several sessions, a client that wakes you when a background command exits
+  (Claude Code) may instead run `node "{{RUNNER_PATH}}" wait <session_dir> --max-wait 18000` in the
+  background; when it exits, read its result and wait again if `next` is still `running`. Report the
+  specific `activities` (e.g. "implementer: editing src/auth.js"), never just "running".
 - **Act on `next`:** in every case below except `running`, **look at the tree before you act** —
   `git status --porcelain=v1 -uall` and `git diff` — because the implementer may have left edits
   behind, and never start a fresh session over a dirty tree left by a dead one.

@@ -137,8 +137,9 @@ function isAlive(pid) {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (e) {
+    // EPERM: the process exists but may not be signalled (a `wait` inside a sandbox, the reviewer outside it)
+    return e.code === "EPERM";
   }
 }
 

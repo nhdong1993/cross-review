@@ -92,6 +92,14 @@ test("lists the four review tools and the two delegate tools, hinted by what the
     const delegate = tools.find(t => t.name === "delegate_begin");
     assert.ok(!("skill" in delegate.inputSchema.properties), "delegate_begin has no skill parameter");
     assert.deepEqual(delegate.inputSchema.properties.reviewer.enum, ["codex", "claude", "agy", "grok"]);
+    // begin and reply return while the reviewer still works and nothing wakes the caller: every
+    // description says so, and none calls it background work (which clients report back on)
+    const text = name => tools.find(t => t.name === name).description;
+    for (const t of tools) assert.ok(!t.description.includes("in the background"), `${t.name}: no "in the background"`);
+    for (const name of ["review_begin", "review_reply", "delegate_begin", "delegate_reply"]) {
+      for (const re of [/nothing notifies you/, /review_wait/, /end your turn/]) assert.match(text(name), re, name);
+    }
+    assert.match(text("review_wait"), /do not end your turn/);
   } finally {
     await client.close();
   }
@@ -106,6 +114,7 @@ test("delegate_begin → review_wait → review_end: DONE finalizes the session"
     const begun = await call(client, "delegate_begin", { input: DELEGATE_INPUT, working_dir: workDir });
     assert.equal(begun.isError, false);
     assert.equal(begun.body.status, "running");
+    assert.equal(begun.body.next, "running");
     const state = JSON.parse(fs.readFileSync(path.join(begun.body.session_dir, "state.json"), "utf8"));
     assert.equal(state.skill_name, "delegate-impl");
     const waited = await call(client, "review_wait", { session_dir: begun.body.session_dir, max_wait_seconds: 30 });
@@ -157,6 +166,8 @@ test("review_begin → review_wait → review_end over stdio", async () => {
     const begun = await call(client, "review_begin", { skill: "review-plan", input: PLAN_INPUT, working_dir: workDir });
     assert.equal(begun.isError, false);
     assert.equal(begun.body.status, "running");
+    assert.equal(begun.body.next, "running");
+    assert.match(begun.body.next_action, /review_wait/);
     const waited = await call(client, "review_wait", { session_dir: begun.body.session_dir, max_wait_seconds: 30 });
     assert.equal(waited.body.status, "completed");
     assert.equal(waited.body.next, "done");

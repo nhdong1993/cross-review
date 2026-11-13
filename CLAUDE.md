@@ -145,16 +145,17 @@ Besides the prompts and outputs, a session keeps what the dashboard needs to ret
 - **Built-in output parsers**: ISSUE (PR reviews add Overall Assessment), RESPONSE (older PR rounds) and think-about formats; the verdict is parsed independently of the format, including verdict-only output
 - **Review timeout**: default 18,000 s (5 h); a timeout is resumable only when `poll` reports `timeout_reason: "runner_deadline"`, `recoverable: true`, a `thread_id`, and `progress_observed: true`
 - **ABSOLUTE USER AUTHORITY**: for review-operation decisions the user's latest explicit instruction is final. It does not authorize unrequested product, API, schema, persistence, or compatibility changes
-- **PID-reuse protection**: `verifyReviewer()` and `verifyWatchdog()` check the process cmdline before killing
+- **PID-reuse protection**: `verifyReviewer()` and `verifyWatchdog()` check the process cmdline before killing; `programOf` reads `env` directly before a node host as that node-hosted script, which is what a `#!/usr/bin/env node` CLI shows in its first moments
+- **Nothing wakes a caller**: `begin` and `reply` return while the reviewer runs detached, and no client is told when it exits. Every result that leaves a round running (`begin`, `reply`, a `wait` that timed out) carries `next: "running"` and `next_action` (`RUNNING` in `lib/review-core.js`), and the tool descriptions and Wait rules say the same: keep calling `wait` before ending the turn, or run the CLI `wait --max-wait` as a background command in a client that wakes on its exit (Claude Code)
 - **Atomic install** with staging, rename and rollback
 
 ### review-runner.js Commands (v15)
 
 | Command | Input | Output |
 |---------|-------|--------|
-| `begin --skill S [--mode M] --input <file\|-> [--working-dir D] [--model] [--effort] [--timeout] [--reviewer] [--skills-dir]` | Markdown placeholder values | JSON: `{ session_dir, round, status, analysis_prompt? }` |
-| `wait <session_dir> [--max-wait <s>]` | (none) | JSON: poll result plus `next`, `next_reason` |
-| `reply <session_dir> --input <file\|-> [--model] [--effort]` | Markdown placeholder values | JSON: `{ status, session_dir, round, thread_id }` |
+| `begin --skill S [--mode M] --input <file\|-> [--working-dir D] [--model] [--effort] [--timeout] [--reviewer] [--skills-dir]` | Markdown placeholder values | JSON: `{ session_dir, round, status, next, next_reason, next_action, analysis_prompt? }` |
+| `wait <session_dir> [--max-wait <s>]` | (none) | JSON: poll result plus `next`, `next_reason` (and `next_action` while `running`) |
+| `reply <session_dir> --input <file\|-> [--model] [--effort]` | Markdown placeholder values | JSON: `{ status, session_dir, round, thread_id, next, next_reason, next_action }` |
 | `end <session_dir> [--outcome consensus\|stalemate]` | (none) | JSON: `{ status: "ended", finalized, verdict }` |
 | `version` | (none) | Plain text: `15` |
 | `dashboard [--root D] [--port N] [--no-open] [--idle-exit S]` | (none) | Serves the dashboard; prints its link |
@@ -188,6 +189,12 @@ Besides the prompts and outputs, a session keeps what the dashboard needs to ret
 - `skill-packs/` is the single source of truth for templates, runtime and prompts.
 
 ## Breaking Changes
+
+### unreleased: callers told to keep waiting; `stop` right after `start`
+- **Results**: `begin` and `reply` (`review_begin`, `review_reply`, `delegate_begin`, `delegate_reply` and the CLI verbs) add `next: "running"`, `next_reason: "reviewer_running"` and `next_action`; a `wait` that returns while the round still runs adds `next_action`. `status` is unchanged (`running` for begin, `started` for reply). Callers ended their turn after a begin or reply that said nothing about waiting, and nothing woke them when the reviewer finished.
+- **Tool descriptions and skills**: no description says "in the background" any more; each begin/reply tool and the Wait rule (`shared/protocol/core.md`, `delegate-impl`) say that nothing notifies the caller and that it must not end its turn while a round runs. A client that wakes on background-command exit (Claude Code) may run `wait <session_dir> --max-wait 18000` in the background instead and read its result.
+- **Runner**: `isAlive` reads EPERM as alive, as `lib/review-core.js` already did, so a `wait` run inside a sandbox no longer reports a reviewer started outside it as `reviewer_process_exit`. A dead reviewer whose pid another user's process took over now ends as `stalled` after the stall threshold instead.
+- **`stop`/`end` right after `start`/`resume`**: a `#!/usr/bin/env node` CLI (Codex from npm) is `env node <script>` for a moment after it starts (about 0.3 s measured on macOS); `programOf` now reads that as the script, so the reviewer is recognised and killed. Before, `stop` skipped it as a foreign process and still printed `stopped`, and the reviewer ran to the end of its turn.
 
 ### unreleased: Grok Build reviewer
 - **Reviewer** `grok` (xAI's Grok Build CLI) joins `codex`, `claude` and `agy`: on `review_begin`/`delegate_begin`/`--reviewer`, in the settings files (`reviewers.grok`) and in the dashboard's Settings. A turn is `grok --output-format streaming-messages-json --verbatim --no-auto-update --no-plan --sandbox off --always-approve --prompt-file <prompt.txt> [-m M] [--effort E] [--resume ID] --system-prompt-override=<compiled prompt>` (read-only: `--sandbox read-only`). Fixed flags come before every variable value, because the runner recognises its process from unquoted `ps` output and a quote in the session path would hide what follows it.

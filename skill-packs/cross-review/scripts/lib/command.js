@@ -121,14 +121,15 @@ const NODE_HOSTS = new Set(["node", "node.exe", "nodejs"]);
 /**
  * The program a process runs, from its command line: {program, words}, program being the
  * lower-cased file name (either separator) and words its arguments. A node host is skipped,
- * with its options, so a node-hosted script is the program.
+ * with its options, so a node-hosted script is the program; so is `env` directly before one,
+ * which is how a `#!/usr/bin/env node` script appears until env has started node.
  */
 export function programOf(cmdline) {
   const words = splitCommandLine(cmdline);
   const base = w => (w || "").split(/[\\/]/).pop().toLowerCase();
-  let i = 0;
-  if (NODE_HOSTS.has(base(words[0]))) {
-    i = 1;
+  let i = base(words[0]) === "env" && NODE_HOSTS.has(base(words[1])) ? 1 : 0;
+  if (NODE_HOSTS.has(base(words[i]))) {
+    i++;
     while (i < words.length && words[i].startsWith("-")) i++;
   }
   return { program: base(words[i]), words: words.slice(i + 1) };

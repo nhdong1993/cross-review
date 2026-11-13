@@ -48,6 +48,14 @@ test("programOf: the program's lower-cased name and its arguments, quotes kept t
   assert.deepEqual(programOf("  "), { program: "", words: [] });
 });
 
+test("programOf: `env` directly before a node host is skipped, as a `#!/usr/bin/env node` script starts; no other env form", () => {
+  assert.deepEqual(programOf("/usr/bin/env node /x/bin/codex exec --json"), { program: "codex", words: ["exec", "--json"] });
+  assert.deepEqual(programOf("env nodejs --no-warnings /x/bin/tool exec"), { program: "tool", words: ["exec"] });
+  assert.equal(programOf("/usr/bin/env vim codex exec").program, "env");
+  assert.equal(programOf("/usr/bin/env -u codex node /tmp/other.js exec").program, "env");
+  assert.deepEqual(programOf("/usr/bin/env"), { program: "env", words: [] });
+});
+
 test("POSIX: resolveSpawn keeps the name; commandAvailable asks which", POSIX_ONLY, () => {
   assert.deepEqual(resolveSpawn("codex", ["exec", "-"]), { cmd: "codex", args: ["exec", "-"] });
   const bin = fs.mkdtempSync(path.join(os.tmpdir(), "command-posix-"));

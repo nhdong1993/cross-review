@@ -36,6 +36,23 @@ test("every runner skill renders with core and its own protocol variant", () => 
   }
 });
 
+test("every skill that starts a reviewer says not to end the turn while a round runs, and names the background wait", () => {
+  for (const skill of [...RUNNER_SKILLS, "delegate-impl"]) {
+    // delegate-impl wraps its lines; the review skills do not
+    const text = renderSkillTemplate(PACK, skill, OPTS).replace(/\s+/g, " ");
+    for (const idea of [
+      "nothing notifies you",
+      "do not end your turn",
+      `node "${OPTS.runnerPath}" wait <session_dir> --max-wait 18000`,
+      "wait again if `next` is still `running`",
+    ]) assert.ok(text.includes(idea), `${skill}: ${idea}`);
+  }
+  // peer skills still finish their own analysis before the first wait
+  for (const skill of ["review-think", "review-pr"]) {
+    assert.ok(renderSkillTemplate(PACK, skill, OPTS).includes("finish your analysis before calling `review_wait`"), `${skill}: information barrier`);
+  }
+});
+
 test("rendered skills have no placeholders, flavor text, protocol files or bash plumbing", () => {
   for (const skill of RUNNER_SKILLS) {
     const text = renderSkillTemplate(PACK, skill, OPTS);
