@@ -27,10 +27,10 @@ export function readDiscovery(file = discoveryFile()) {
   }
 }
 
-/** Delete the file when it names this process (and this run's token, when given). */
-export function removeDiscoveryIfOwn(pid, { file = discoveryFile(), token = null } = {}) {
+/** Delete the file when it names this process (and its token and port, when given). */
+export function removeDiscoveryIfOwn(pid, { file = discoveryFile(), token = null, port } = {}) {
   const info = readDiscovery(file);
-  if (!info || info.pid !== pid || (token && info.token !== token)) return false;
+  if (!info || info.pid !== pid || (token && info.token !== token) || (port !== undefined && info.port !== port)) return false;
   try {
     fs.unlinkSync(file);
     return true;

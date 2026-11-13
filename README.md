@@ -178,7 +178,9 @@ npx @tlelabs/cross-review dashboard               # without installing
 | --- | --- |
 | ![A plan's phases, criteria and progress log](docs/images/plan.png) | ![Reviewer, model and effort per level and per skill](docs/images/settings.png) |
 
-Starts a local web page and opens it in your browser. It lists the review sessions and plans in the folder you start it from and up to 3 levels below. Options: `--root <dir>` scans another folder, `--port <n>` picks the port (default: a random free one), `--no-open` only prints the link, `--idle-exit <s>` stops the server after that many seconds with no page open.
+Starts a local web page and opens it in your browser. It lists the review sessions and plans in the folder you start it from and up to 3 levels below. Options: `--root <dir>` scans another folder, `--port <n>` picks the port (default: a random free one), `--no-open` only prints the link, `--idle-exit <s>` stops the server after that many seconds with no page open, `--keep-token` reuses a token across starts.
+
+With `--keep-token`, the token stays in `~/.cross-review/dashboard-token` (0600 on POSIX), so a tab open before a restart keeps working when the dashboard comes back on the same address and the browser still has its cookie. Use `--port` to keep the address the same. A leaked link, log line or cookie stays valid across restarts; browsers send the cookie to every server on `127.0.0.1`, whatever the port. To rotate it, stop the dashboard, delete the file and start again; deleting it alone does not change a running dashboard. A damaged or unreadable file stops the start, with no repair or fallback token. After you quit the browser, open the printed link again.
 
 - **Sessions**: reviews in progress (reviewer working, waiting for the agent, stopped) update live; History lists the finished ones with filters. A review left waiting for the agent, or stopped, for over an hour moves to History (`no reply` or `stopped`) and comes back when the agent resumes it. A session's page shows the conversation round by round, the issue ledger, and what the reviewer is doing right now. The dashboard only reads sessions; it never starts, stops or answers one.
 - **Plans**: every plan in `.cross-review/plans/` with its state (draft, in review, ready, phase N of M, done) and progress, live. A plan's page has two tabs: **Progress** (phases, their criteria, checkpoints, commits, the progress log) and **Plan** (the whole file with its contents). Another `.md` file in that folder shows as a plain document. Plans elsewhere in the repository are not shown.
@@ -189,7 +191,7 @@ Starts a local web page and opens it in your browser. It lists the review sessio
 - **Check for updates**: off by default. When on, the dashboard reads the latest version on npm when it starts (at most every 3 days) and every 6 hours while it runs, and the footer says when a newer one is out; **Check now** asks at any time. Nothing about you or your sessions is sent.
 - **Avatars**: pick an image for you, the reviewer and each agent (PNG, JPEG, WebP or GIF, up to 1 MB). Images stay in `~/.cross-review/avatars/`.
 
-The server listens on `127.0.0.1` only. The link it prints carries a per-run token that every request needs, so other web pages cannot read your sessions or change settings.
+The server listens on `127.0.0.1` only. The link it prints carries a token (new at every start unless `--keep-token`) that every request needs, so other web pages cannot read your sessions or change settings.
 
 ## License
 

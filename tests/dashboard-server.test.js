@@ -15,7 +15,8 @@ import { writeFakeCli } from "./helpers/fake-cli.js";
 import { buildFixture, buildPlans, PLANS, writePlan, writeSession } from "./helpers/dashboard-fixture.js";
 import { GITIGNORE, resolveSettings } from "../skill-packs/cross-review/scripts/lib/config.js";
 import { findWorkspaces } from "../skill-packs/cross-review/scripts/lib/dashboard/scan.js";
-import { startDashboard, createListWatcher } from "../skill-packs/cross-review/scripts/lib/dashboard/server.js";
+import { readDiscovery, removeDiscoveryIfOwn, writeDiscovery } from "../skill-packs/cross-review/scripts/lib/dashboard/discovery.js";
+import { startDashboard, runDashboardCli, createListWatcher } from "../skill-packs/cross-review/scripts/lib/dashboard/server.js";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const RUNNER = path.join(REPO, "skill-packs/cross-review/scripts/review-runner.js");
@@ -453,6 +454,61 @@ test("token: 401 without it, 303 with a cookie for the right one, Bearer accepte
   }
 });
 
+test("keep-token: cookie and Bearer survive a same-port restart; per-run tokens do not", async () => {
+  for (const keepToken of [true, false]) {
+    const tokenFile = path.join(mk("token"), "dashboard-token");
+    const { d, root } = await serve({ keepToken, tokenFile });
+    let restarted;
+    try {
+      const page = await request(d.port, `/?t=${d.token}`, { headers: { Connection: "close" } });
+      assert.equal(page.status, 303);
+      const cookie = String(page.headers["set-cookie"]).split(";")[0];
+      await d.close();
+      ({ d: restarted } = await serve({ root, port: d.port, keepToken, tokenFile }));
+      assert.equal(restarted.port, d.port);
+      if (keepToken) {
+        assert.equal(restarted.token, d.token);
+        if (process.platform !== "win32") assert.equal(fs.statSync(tokenFile).mode & 0o777, 0o600);
+      } else {
+        assert.notEqual(restarted.token, d.token);
+        assert.equal(fs.existsSync(tokenFile), false, "the default never creates a token file");
+      }
+      for (const headers of [{ Cookie: cookie }, bearer(d)]) {
+        assert.equal((await request(restarted.port, "/api/sessions", { headers: { Connection: "close", ...headers } })).status, keepToken ? 200 : 401);
+      }
+      await restarted.close();
+      if (!keepToken) {
+        fs.writeFileSync(tokenFile, "not a token");
+        ({ d: restarted } = await serve({ root, port: d.port, tokenFile }));
+        assert.equal(fs.readFileSync(tokenFile, "utf8"), "not a token", "the default ignores an existing token file");
+        assert.equal((await request(restarted.port, "/api/health", { headers: { Connection: "close", ...bearer(restarted) } })).status, 200);
+      }
+    } finally {
+      await d.close();
+      if (restarted) await restarted.close();
+    }
+  }
+});
+
+test("keep-token: stop, delete, start rotates the token and refuses the old cookie", async () => {
+  const tokenFile = path.join(mk("token"), "dashboard-token");
+  const { d, root } = await serve({ keepToken: true, tokenFile });
+  let restarted;
+  try {
+    const page = await request(d.port, `/?t=${d.token}`, { headers: { Connection: "close" } });
+    const cookie = String(page.headers["set-cookie"]).split(";")[0];
+    await d.close();
+    fs.unlinkSync(tokenFile);
+    ({ d: restarted } = await serve({ root, port: d.port, keepToken: true, tokenFile }));
+    assert.notEqual(restarted.token, d.token);
+    assert.equal((await request(restarted.port, "/api/sessions", { headers: { Connection: "close", Cookie: cookie } })).status, 401);
+    assert.equal((await request(restarted.port, "/api/sessions", { headers: { Connection: "close", ...bearer(restarted) } })).status, 200);
+  } finally {
+    await d.close();
+    if (restarted) await restarted.close();
+  }
+});
+
 // ---------- 7 ----------
 
 test("dashboard.json: written 0600 with pid, port, token, root; removed on close unless another process owns it", async () => {
@@ -472,6 +528,42 @@ test("dashboard.json: written 0600 with pid, port, token, root; removed on close
   fs.writeFileSync(file, JSON.stringify(other));
   await d2.close();
   assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), other);
+});
+
+test("removeDiscoveryIfOwn: another port is not ours; omitting the port keeps the old behavior", () => {
+  const file = path.join(mk("disc"), "dashboard.json");
+  const info = { pid: process.pid, token: "e".repeat(64), port: 20000 };
+  writeDiscovery(info, file);
+  assert.equal(removeDiscoveryIfOwn(process.pid, { file, token: info.token, port: 20001 }), false);
+  assert.deepEqual(readDiscovery(file), info);
+  assert.equal(removeDiscoveryIfOwn(process.pid, { file, token: info.token, port: info.port }), true);
+  assert.equal(fs.existsSync(file), false);
+  writeDiscovery(info, file);
+  assert.equal(removeDiscoveryIfOwn(process.pid, { file, token: info.token }), true);
+  assert.equal(fs.existsSync(file), false);
+});
+
+test("keep-token: closing the older of two live instances leaves the newer discovery file", async () => {
+  const home = mk("home");
+  const tokenFile = path.join(home, "dashboard-token");
+  const discoveryFile = path.join(home, "dashboard.json");
+  const { d } = await serve({ keepToken: true, tokenFile, discoveryFile });
+  let newer;
+  try {
+    ({ d: newer } = await serve({ keepToken: true, tokenFile, discoveryFile }));
+    assert.equal(newer.token, d.token);
+    assert.notEqual(newer.port, d.port);
+    const info = readDiscovery(discoveryFile);
+    assert.equal(info.port, newer.port);
+    await d.close();
+    assert.deepEqual(readDiscovery(discoveryFile), info);
+    assert.equal((await request(newer.port, "/api/health", { headers: bearer(newer) })).status, 200);
+    await newer.close();
+    assert.equal(fs.existsSync(discoveryFile), false);
+  } finally {
+    await d.close();
+    if (newer) await newer.close();
+  }
 });
 
 // ---------- 8, AC-3.5 ----------
@@ -563,6 +655,76 @@ test("dashboard command: bad arguments fail with a message", async () => {
   const { code } = await run.exited;
   assert.equal(code, 1);
 });
+
+test("runDashboardCli: --keep-token starts with the file's token and appears in usage", async t => {
+  const bin = stubReviewerCli();
+  writeFakeCli(bin, "codex", "process.exit(1);\n");
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${savedPath}`;
+  t.after(() => { process.env.PATH = savedPath; });
+  const tokenFile = path.join(mk("token"), "dashboard-token");
+  const token = "d".repeat(64);
+  fs.writeFileSync(tokenFile, `${token}\n`, { mode: 0o600 });
+  let out = "";
+  let err = "";
+  let response;
+  const code = await runDashboardCli(["--keep-token", "--root", mk("cli"), "--port", "0", "--no-open", "--idle-exit", "2"], {
+    tokenFile,
+    out: { write(text) {
+      out += text;
+      const url = new URL(text.split(" ")[2]);
+      response = request(Number(url.port), "/api/health", { headers: bearer({ token }) });
+    } },
+    err: { write(text) { err += text; } },
+  });
+  assert.equal(code, 0, err);
+  assert.equal(err, "");
+  assert.ok(out.includes(`/?t=${token}`));
+  assert.equal((await response).status, 200);
+  assert.equal(fs.readFileSync(tokenFile, "utf8"), `${token}\n`);
+  assert.equal(await runDashboardCli(["--unknown"], { tokenFile, err: { write(text) { err += text; } } }), 1);
+  assert.match(err, /Usage: dashboard .*\[--keep-token\]/);
+});
+
+for (const kind of ["malformed", "unreadable", "unpublishable"]) {
+  const needsModes = kind === "unreadable" && (process.platform === "win32" || process.getuid() === 0);
+  test(`runDashboardCli: --keep-token ${kind} file fails without a listener or a fallback`, { skip: needsModes && "needs POSIX modes and a non-root user" }, async t => {
+    const dir = mk("token");
+    const tokenFile = path.join(dir, "dashboard-token");
+    const text = kind === "malformed" ? "damaged token\n" : `${"b".repeat(64)}\n`;
+    const mode = kind === "unreadable" ? 0o000 : 0o644;
+    if (kind === "unpublishable") {
+      t.mock.method(fs, "linkSync", () => { throw Object.assign(new Error("operation not permitted"), { code: "EPERM" }); });
+    } else {
+      fs.writeFileSync(tokenFile, text, { mode });
+    }
+    const port = await new Promise(r => { const s = net.createServer(); s.listen(0, "127.0.0.1", () => { const p = s.address().port; s.close(() => r(p)); }); });
+    let out = "";
+    let err = "";
+    try {
+      const code = await runDashboardCli(["--keep-token", "--root", mk("cli"), "--port", String(port), "--no-open", "--idle-exit", "2"], {
+        tokenFile, out: { write(text) { out += text; } }, err: { write(text) { err += text; } },
+      });
+      assert.equal(code, 1);
+      const renew = "stop the dashboard, delete the file and start again to get a new token.";
+      const message = kind === "malformed" ? `${tokenFile} does not hold a dashboard token: Stop${renew.slice(4)}`
+        : kind === "unreadable" ? `cannot read the dashboard token file ${tokenFile} (EACCES). Make it readable, or ${renew}`
+        : `cannot create the dashboard token file ${tokenFile} (EPERM)`;
+      assert.equal(err, `cross-review dashboard: ${message}\n`);
+      assert.equal(out, "");
+      await assert.rejects(request(port, "/api/health"), { code: "ECONNREFUSED" });
+      if (kind === "unpublishable") {
+        assert.deepEqual(fs.readdirSync(dir), [], "no published token or temp file");
+      } else {
+        if (process.platform !== "win32") assert.equal(fs.statSync(tokenFile).mode & 0o777, mode, "mode unchanged");
+        assert.deepEqual(fs.readdirSync(dir), ["dashboard-token"]);
+      }
+    } finally {
+      if (kind === "unreadable") fs.chmodSync(tokenFile, 0o600);
+    }
+    if (kind !== "unpublishable") assert.equal(fs.readFileSync(tokenFile, "utf8"), text, "bytes unchanged");
+  });
+}
 
 // ---------- 9 ----------
 

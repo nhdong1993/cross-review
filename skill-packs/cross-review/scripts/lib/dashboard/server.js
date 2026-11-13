@@ -1,11 +1,11 @@
 // Local dashboard server: one page and a small JSON/SSE API over node:http, bound to
-// 127.0.0.1 and guarded by a per-run token, a Host check and an Origin check on writes.
+// 127.0.0.1 and guarded by a token (per run unless --keep-token), a Host check and an Origin check on writes.
 // It only reads session and plan files (its git commands are read-only); it writes
 // ~/.cross-review/dashboard.json, the settings (~/.cross-review/config.json,
 // <workspace>/.cross-review/config.json), <workspace>/.cross-review/.gitignore when Plans in git
-// is saved, and the avatars in ~/.cross-review/avatars/.
+// is saved, the avatars in ~/.cross-review/avatars/, and the opt-in ~/.cross-review/dashboard-token.
 //
-//   startDashboard({root, port, open, idleExitSeconds}) → {url, port, token, root, close(), closed}
+//   startDashboard({root, port, open, idleExitSeconds, keepToken}) → {url, port, token, root, close(), closed}
 //   runDashboardCli(argv) → exit code (the `dashboard` command)
 
 import crypto from "node:crypto";
@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { classify, inputValues, readSession, roundActivity } from "./model.js";
 import { findWorkspaces, isWorkspace, listSessions, sessionsDir, SCAN_DEPTH, SESSION_ID_RE } from "./scan.js";
 import { discoveryFile, removeDiscoveryIfOwn, writeDiscovery } from "./discovery.js";
+import { keptToken } from "./token.js";
 import { AvatarError, avatarFile, listAvatars, removeAvatar, saveAvatar, AVATAR_MAX_BYTES } from "./avatars.js";
 import { CONFIG_SKILLS, ensureCrossReviewDir, globalConfigPath, readConfig, resolvePlanSettings, syncGitignore, validateConfig, workspaceConfigPath, writeConfig } from "../config.js";
 import { fillCommits, gitPlanFacts, gitWatch, listPlans, parsePlan, planProgress, planState, plansDir, plansWarning, summarizePlanText } from "../plans.js";
@@ -622,7 +623,7 @@ function reviewerCatalog(impl, cacheFile) {
 // ---------- server ----------
 
 /**
- * Start the dashboard. Options besides the documented four are for tests: pickPort,
+ * Start the dashboard. Options besides the documented five are for tests: tokenFile, pickPort,
  * discoveryFile (null: none), now, tickMs, rescanMs, isAlive, reveal, catalogs ({<reviewer>:
  * {listModels, defaultModel, cliInfo}}; default: each reviewer adapter; a reviewer left out of an
  * injected map has no catalog), catalogCaches ({<reviewer>: the file that keeps its model list
@@ -631,13 +632,13 @@ function reviewerCatalog(impl, cacheFile) {
  * default: the latest version on npm), updateCache (default ~/.cross-review/update.json).
  */
 export async function startDashboard({
-  root = process.cwd(), port = null, open = false, idleExitSeconds = null,
+  root = process.cwd(), port = null, open = false, idleExitSeconds = null, keepToken = false, tokenFile,
   pickPort = randomPort, discoveryFile: discFile = discoveryFile(), host = "127.0.0.1",
   now, tickMs = 1000, rescanMs, isAlive, reveal = revealFolder, catalogs: injectedCatalogs, catalogCaches = {},
   latestVersion = fetchLatestVersion, updateCache = updateCachePath(), streamBacklogMax = STREAM_BACKLOG_MAX,
 } = {}) {
   const watcher = createListWatcher({ root, now, tickMs, rescanMs, isAlive });
-  const token = crypto.randomBytes(32).toString("hex");
+  const token = keepToken ? keptToken(tokenFile) : crypto.randomBytes(32).toString("hex");
   const tokenBuf = Buffer.from(token);
   const streams = new Set();
   let idleSince = Date.now();
@@ -1159,7 +1160,7 @@ export async function startDashboard({
     if (idleTimer) clearInterval(idleTimer);
     clearInterval(updateTimer);
     watcher.close();
-    if (discFile) removeDiscoveryIfOwn(process.pid, { file: discFile, token });
+    if (discFile) removeDiscoveryIfOwn(process.pid, { file: discFile, token, port });
     closing = new Promise(resolve => {
       server.close(() => resolve());
       server.closeAllConnections();
@@ -1179,18 +1180,20 @@ export async function startDashboard({
 
 // ---------- the `dashboard` command ----------
 
-const USAGE = "Usage: dashboard [--root <dir>] [--port <n>] [--no-open] [--idle-exit <seconds>]\n";
+const USAGE = "Usage: dashboard [--root <dir>] [--port <n>] [--no-open] [--idle-exit <seconds>] [--keep-token]\n";
 
-export async function runDashboardCli(argv, { out = process.stdout, err = process.stderr } = {}) {
+export async function runDashboardCli(argv, { out = process.stdout, err = process.stderr, tokenFile } = {}) {
   let root = process.cwd();
   let port = null;
   let open = true;
+  let keepToken = false;
   let idleExitSeconds = null;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--root") root = argv[++i];
     else if (a === "--port") port = Number(argv[++i]);
     else if (a === "--no-open") open = false;
+    else if (a === "--keep-token") keepToken = true;
     else if (a === "--idle-exit") idleExitSeconds = Number(argv[++i]);
     else {
       err.write(`cross-review dashboard: unknown argument ${a}\n${USAGE}`);
@@ -1211,7 +1214,7 @@ export async function runDashboardCli(argv, { out = process.stdout, err = proces
   }
   let d;
   try {
-    d = await startDashboard({ root: path.resolve(root), port, open, idleExitSeconds });
+    d = await startDashboard({ root: path.resolve(root), port, open, idleExitSeconds, keepToken, tokenFile });
   } catch (e) {
     err.write(`cross-review dashboard: ${e.message}\n`);
     return 1;
