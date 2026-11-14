@@ -15,7 +15,7 @@ import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 import { resolveSpawn } from "./lib/command.js";
 import { parseOutputMarkdown } from "./lib/parse.js";
-import { beginSession, waitSession, replySession, endSession, roundInputValues, DEFAULT_MAX_WAIT_S } from "./lib/review-core.js";
+import { beginSession, waitSession, replySession, endSession, roundInputValues, capActivities, DEFAULT_MAX_WAIT_S } from "./lib/review-core.js";
 import { getReviewer } from "./lib/reviewers/index.js";
 import { flushLineTimes } from "./lib/line-times.js";
 import { convergence, disputedIds, issueIds } from "./lib/convergence.js";
@@ -1575,6 +1575,9 @@ function cmdPoll(argv) {
     updateState(stateDir, { thread_id: result.extractedThreadId });
   }
 
+  // a busy turn's activities would outgrow what a client accepts, here and in final.txt
+  Object.assign(result.json, capActivities(result.json.activities));
+
   if (result.terminal) {
     if (result.json.status !== "timeout") {
       clearDeadlineMarker(stateDir);
@@ -2010,6 +2013,9 @@ function cmdEnd(argv) {
 // ============================================================
 
 function main() {
+  // exit only once stdout is written: a pipe is asynchronous on POSIX, and exiting at once loses
+  // everything past its 64 KiB buffer
+  const exit = code => process.stdout.write("", () => process.exit(code));
   const argv = process.argv.slice(2);
   const command = argv[0] || "";
   const rest = argv.slice(1);
@@ -2053,19 +2059,19 @@ function main() {
     case "reply":
     case "end": {
       const verb = { begin: cmdBegin, wait: cmdWait, reply: cmdReply, end: cmdEnd }[command];
-      verb(rest).then(code => process.exit(code));
+      verb(rest).then(exit);
       return;
     }
     case "plans":
       import("./lib/plans.js")
         .then(m => m.runPlansCli(rest))
-        .then(code => process.exit(code));
+        .then(exit);
       return;
     case "dashboard":
       // Loaded on demand: the review commands never pay for the dashboard modules
       import("./lib/dashboard/server.js")
         .then(m => m.runDashboardCli(rest))
-        .then(code => process.exit(code));
+        .then(exit);
       return;
     default:
       process.stderr.write(
@@ -2097,7 +2103,7 @@ function main() {
 
   // _watchdog returns -1 to keep process alive
   if (exitCode >= 0) {
-    process.exit(exitCode);
+    exit(exitCode);
   }
 }
 

@@ -430,6 +430,23 @@ function isAlive(pid) {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// shortcut: fixed 20 newest / 150 chars, make configurable if callers need more history
+const MAX_ACTIVITIES = 20;
+const MAX_DETAIL = 150;
+
+/**
+ * Keeps a result small enough for an MCP client (about 50,000 characters): the newest activities,
+ * each detail cut the way the adapters cut reasoning. Idempotent; activities_omitted adds up what
+ * this and any earlier cut dropped, and is present only when something was.
+ */
+export function capActivities(list = [], omitted = 0) {
+  const dropped = Math.max(0, list.length - MAX_ACTIVITIES);
+  const activities = list.slice(dropped).map(a =>
+    typeof a.detail === "string" && a.detail.length > MAX_DETAIL ? { ...a, detail: a.detail.slice(0, MAX_DETAIL) + "..." } : a);
+  const total = omitted + dropped;
+  return total > 0 ? { activities, activities_omitted: total } : { activities };
+}
+
 /**
  * Wait up to maxWaitSeconds for the current round. Polls at the runner's cadence, and
  * immediately once the reviewer process has exited. Returns the poll JSON plus next/next_reason.
@@ -444,22 +461,23 @@ export async function waitSession(sessionDir, { maxWaitSeconds = DEFAULT_MAX_WAI
     throw new ReviewError(`Cannot read session state: ${e.message}`, "INVALID_SESSION");
   }
 
-  // Each poll returns only activities new since the previous poll; keep all of them
-  const activities = [];
+  // Each poll returns only activities new since the previous poll; keep the newest of all of them
+  let capped = capActivities();
   for (;;) {
     state = readState(sessionDir);
     const now = Math.floor(Date.now() / 1000);
     const due = !state.last_poll_at || now - state.last_poll_at >= POLL_INTERVAL_S;
     if (fs.existsSync(finalFile) || !isAlive(state.pid) || due) {
       const pollJson = await runnerJson(["poll", sessionDir, "--min-interval", "0"], "", "POLL_FAILED");
-      if (Array.isArray(pollJson.activities)) activities.push(...pollJson.activities);
+      capped = capActivities([...capped.activities, ...(pollJson.activities || [])],
+        (capped.activities_omitted || 0) + (pollJson.activities_omitted || 0));
       if (pollJson.status !== "running" || Date.now() >= deadline) {
-        return { ...pollJson, activities, ...computeNext(pollJson, readState(sessionDir)) };
+        return { ...pollJson, ...capped, ...computeNext(pollJson, readState(sessionDir)) };
       }
     }
     if (Date.now() + CHECK_INTERVAL_MS > deadline) {
       const elapsed = state.started_at ? now - state.started_at : null;
-      return { status: "running", round: state.round, elapsed_seconds: elapsed, activities, ...computeNext({ status: "running" }, state) };
+      return { status: "running", round: state.round, elapsed_seconds: elapsed, ...capped, ...computeNext({ status: "running" }, state) };
     }
     await sleep(CHECK_INTERVAL_MS);
   }
@@ -497,6 +515,12 @@ export async function replySession(sessionDir, { inputText, inputFile, model, ef
   const args = ["resume", sessionDir, "--effort", useEffort];
   if (useModel) args.push("--model", useModel);
   if (state.timeout) args.push("--timeout", String(state.timeout));
+  // Only a poll closes a round (thread id, review, final.txt), and callers reply without waiting:
+  // close it here at wait's own cadence, so a live reviewer gets no extra stall tick.
+  if (!fs.existsSync(path.join(sessionDir, "final.txt"))
+    && (await waitSession(sessionDir, { maxWaitSeconds: 0 })).status === "running") {
+    throw new ReviewError("The reviewer is still working on this round: call wait until next is not running, then reply", "ROUND_STILL_RUNNING");
+  }
   const result = await runnerJson(args, prompt, "RESUME_FAILED");
   writeRoundInput(sessionDir, result.round, raw);
   // The session is open again, so its finalization is stale: meta.json would otherwise keep the

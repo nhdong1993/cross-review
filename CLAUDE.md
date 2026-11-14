@@ -192,6 +192,11 @@ Besides the prompts and outputs, a session keeps what the dashboard needs to ret
 
 ## Breaking Changes
 
+### unreleased: reply closes an unpolled round; activities capped; stdout drained before exit
+- **`reply`** (`review_reply`, `delegate_reply`, CLI `reply`): when the round has no `final.txt` yet, it first polls the way `wait` with `max_wait_seconds: 0` does, so a caller that replies without waiting no longer gets `SESSION_BROKEN` (no thread id) or `ROUND_STILL_RUNNING` for a round that has ended. While the reviewer still runs it answers `ROUND_STILL_RUNNING` without launching anything; a reviewer alive after its turn and polled under 120 s ago also gets that answer, until the next `wait`.
+- **Activities**: a new `poll` result and every `wait` result keep the newest 20 activities, each `detail` cut at 150 characters plus `...`, and add `activities_omitted` (the total dropped, over every poll of the wait) when anything was dropped. Busy rounds made `review_wait` results larger than the client accepts (about 50,000 characters). A `final.txt` written by an older runner still prints whole from the low-level `poll`; `wait` caps it.
+- **Runner output**: commands exit only once stdout is written. A pipe is written asynchronously on POSIX, so `process.exit` right after a write lost everything past 64 KiB, and a large `poll` result reached `wait` as invalid JSON (cached in `final.txt`, so every later `wait` failed too).
+
 ### unreleased: dashboard --keep-token
 - **Opt-in kept token**: `dashboard --keep-token` uses `~/.cross-review/dashboard-token` (0600 on POSIX), so an open tab keeps working after a restart on the same address while its cookie remains. Without the flag, tokens stay per run; Follow is unchanged.
 - **Security and rotation**: a leaked link, log line or cookie stays valid across restarts; cookies reach every server on `127.0.0.1`, regardless of port. Stop the dashboard, delete the file and start again to rotate; deleting alone does not change a running dashboard. A malformed or unreadable file stops the start instead of being repaired or replaced by a per-run token.
