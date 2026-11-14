@@ -104,7 +104,7 @@ function createServer() {
   server.registerTool("review_wait", {
     title: "Wait for the current review round",
     annotations: ANNOTATIONS,
-    description: `Wait up to max_wait_seconds (default ${DEFAULT_WAIT_S}) for the reviewer. Returns the round status, parsed review, activities, and next: running (call again; do not end your turn while it is running, nothing notifies you when the reviewer finishes), respond (reply), cross_check (peer skills: compare with your analysis, then reply or end with an outcome), done (end), ask_user, or stopped.`,
+    description: `Wait up to max_wait_seconds (default ${DEFAULT_WAIT_S}) for the reviewer. Returns the round status, parsed review, the newest activities (up to 20; activities_omitted counts the rest), and next: running (call again; do not end your turn while it is running, nothing notifies you when the reviewer finishes), respond (reply), cross_check (peer skills: compare with your analysis, then reply or end with an outcome), done (end), ask_user, or stopped.`,
     inputSchema: {
       session_dir: z.string(),
       max_wait_seconds: z.number().int().min(0).optional(),

@@ -1,6 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import {
   SKILL_TEMPLATES,
   beginSession,
+  capActivities,
   computeNext,
   endSession,
   parseReviewInput,
@@ -452,6 +453,151 @@ test("wait returns activities from polls made before its deadline", async () => 
   } finally {
     delete process.env.FAKE_CODEX_SLOW_MS;
   }
+});
+
+// ---------- reply on an unpolled round, activity cap, large stdout ----------
+
+const outputLines = dir => {
+  const f = path.join(dir, "output.jsonl");
+  return fs.existsSync(f) ? completeLines(f) : 0;
+};
+function withEnv(vars, fn) {
+  Object.assign(process.env, vars);
+  return fn().finally(() => { for (const k of Object.keys(vars)) delete process.env[k]; });
+}
+
+test("reply closes a finished round that nobody waited for", async () => {
+  setCodexOutput("### VERDICT\n- Status: REVISE\n");
+  const begun = await beginSession({ skill: "review-plan", inputText: inputFor("review-plan", "nw"), workingDir: workDir });
+  await until(() => !aliveNow(readJson(path.join(begun.session_dir, "state.json")).pid), 15000, "reviewer exit");
+  const replied = await replySession(begun.session_dir, { inputText: inputFor("review-plan", "nw2") });
+  assert.equal(replied.status, "started");
+  assert.equal(replied.next, "running");
+  assert.equal(replied.round, 2);
+  await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
+  await endSession(begun.session_dir);
+});
+
+test("reply closes a round that finished after a poll saw it running", async () => {
+  setCodexOutput("### VERDICT\n- Status: REVISE\n");
+  await withEnv({ FAKE_CODEX_SLOW_MS: "1500" }, async () => {
+    const begun = await beginSession({ skill: "review-plan", inputText: inputFor("review-plan", "pr"), workingDir: workDir });
+    await until(() => outputLines(begun.session_dir) >= 2, 15000, "2 output lines");
+    assert.equal((await waitSession(begun.session_dir, { maxWaitSeconds: 0 })).status, "running");
+    await until(() => !aliveNow(readJson(path.join(begun.session_dir, "state.json")).pid), 15000, "reviewer exit");
+    const replied = await replySession(begun.session_dir, { inputText: inputFor("review-plan", "pr2") });
+    assert.equal(replied.status, "started");
+    assert.equal(replied.round, 2);
+    await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
+    await endSession(begun.session_dir);
+  });
+});
+
+test("reply to a running reviewer that has a thread id refuses without a stall tick (safety control)", async () => {
+  setCodexOutput("### VERDICT\n- Status: REVISE\n");
+  await withEnv({ FAKE_CODEX_SLOW_MS: "8000" }, async () => {
+    const begun = await beginSession({ skill: "review-plan", inputText: inputFor("review-plan", "rr"), workingDir: workDir });
+    await until(() => outputLines(begun.session_dir) >= 2, 15000, "2 output lines");
+    await waitSession(begun.session_dir, { maxWaitSeconds: 0 });
+    const before = readJson(path.join(begun.session_dir, "state.json"));
+    await assert.rejects(replySession(begun.session_dir, { inputText: inputFor("review-plan", "rr2") }), { code: "ROUND_STILL_RUNNING" });
+    const afterState = readJson(path.join(begun.session_dir, "state.json"));
+    assert.equal(afterState.stall_count, before.stall_count);
+    assert.ok(aliveNow(afterState.pid), "the reviewer keeps running");
+    await endSession(begun.session_dir);
+  });
+});
+
+test("reply to a running reviewer that has no thread id yet says the round is still running", async () => {
+  setCodexOutput("### VERDICT\n- Status: REVISE\n");
+  const gate = path.join(tmp, "gate-cold");
+  await withEnv({ FAKE_CODEX_CMDS: "1", FAKE_CODEX_NO_THREAD: "1", FAKE_CODEX_GATE: gate }, async () => {
+    const begun = await beginSession({ skill: "review-plan", inputText: inputFor("review-plan", "cs"), workingDir: workDir });
+    try {
+      await until(() => outputLines(begun.session_dir) >= 3, 15000, "3 output lines");
+      await assert.rejects(replySession(begun.session_dir, { inputText: inputFor("review-plan", "cs2") }), { code: "ROUND_STILL_RUNNING" });
+      assert.ok(aliveNow(readJson(path.join(begun.session_dir, "state.json")).pid), "the reviewer keeps running");
+      assert.equal(readJson(path.join(begun.session_dir, "rounds.json")).length, 1);
+    } finally {
+      fs.writeFileSync(gate, "");
+    }
+    await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
+    await endSession(begun.session_dir);
+  });
+});
+
+test("capActivities keeps the newest 20, shortens details and counts what it drops", () => {
+  const list = Array.from({ length: 25 }, (_, i) => ({ time: i, type: "command_started", detail: `a${i} ` + "y".repeat(400) }));
+  const capped = capActivities(list);
+  assert.equal(capped.activities.length, 20);
+  assert.equal(capped.activities[0].time, 5);
+  assert.ok(capped.activities.every(a => a.detail.length === 153 && a.detail.endsWith("...")));
+  assert.equal(capped.activities_omitted, 5);
+  assert.deepEqual(capActivities(capped.activities, capped.activities_omitted), capped);
+  assert.deepEqual(capActivities([{ time: 1, type: "thinking", detail: "short" }]), { activities: [{ time: 1, type: "thinking", detail: "short" }] });
+  assert.equal(capActivities(list, 7).activities_omitted, 12);
+});
+
+test("wait caps activities summed over several polls", async () => {
+  setCodexOutput("### VERDICT\n- Status: REVISE\n");
+  const gate = path.join(tmp, "gate-two-polls");
+  await withEnv({ FAKE_CODEX_CMDS: "25", FAKE_CODEX_GATE: gate }, async () => {
+    const begun = await beginSession({ skill: "review-plan", inputText: inputFor("review-plan", "tp"), workingDir: workDir });
+    // the first poll must see the whole first burst, or every activity would reach wait in one poll
+    await until(() => outputLines(begun.session_dir) >= 52, 15000, "52 output lines");
+    const waiting = waitSession(begun.session_dir, { maxWaitSeconds: 60 });
+    await until(() => readJson(path.join(begun.session_dir, "state.json")).last_poll_at, 15000, "first poll");
+    fs.writeFileSync(gate, "");
+    const w = await waiting;
+    assert.equal(w.status, "completed");
+    // turn.started + 100 command events, newest 20 kept: the last 10 command pairs
+    assert.equal(w.activities_omitted, 81);
+    const expected = [];
+    for (let i = 41; i <= 50; i++) expected.push(`cmd-${i}`, `cmd-${i}`);
+    assert.deepEqual(w.activities.map(a => a.detail.split(" ")[0]), expected);
+    assert.ok(w.activities.every(a => a.detail.length <= 153));
+    await endSession(begun.session_dir);
+  });
+});
+
+test("wait caps activities when its deadline passes while the round runs", async () => {
+  setCodexOutput("### VERDICT\n- Status: REVISE\n");
+  const gate = path.join(tmp, "gate-deadline");
+  await withEnv({ FAKE_CODEX_CMDS: "25", FAKE_CODEX_GATE: gate }, async () => {
+    const begun = await beginSession({ skill: "review-plan", inputText: inputFor("review-plan", "dl"), workingDir: workDir });
+    try {
+      await until(() => outputLines(begun.session_dir) >= 52, 15000, "52 output lines");
+      const w = await waitSession(begun.session_dir, { maxWaitSeconds: 2 });
+      assert.equal(w.status, "running");
+      assert.equal(w.activities.length, 20);
+      assert.equal(w.activities_omitted, 31);
+    } finally {
+      fs.writeFileSync(gate, "");
+    }
+    await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
+    await endSession(begun.session_dir);
+  });
+});
+
+// Pipes are written asynchronously on POSIX (macOS, Linux) and synchronously on Windows
+// (https://nodejs.org/docs/latest-v24.x/api/process.html#a-note-on-process-io): without the drain
+// before exit, output past 64 KiB is lost on POSIX only.
+test("runner output larger than 64 KiB reaches a pipe whole", async () => {
+  setCodexOutput("### VERDICT\n- Status: APPROVE\n");
+  const begun = await beginSession({ skill: "review-plan", inputText: inputFor("review-plan", "big"), workingDir: workDir });
+  await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
+  await endSession(begun.session_dir);
+  const big = "z".repeat(200000) + "END-OF-REVIEW";
+  fs.writeFileSync(path.join(begun.session_dir, "final.txt"), JSON.stringify({ status: "completed", round: 1, review: { raw_markdown: big } }));
+  const run = (args, input) => new Promise((resolve, reject) => {
+    const child = execFile(process.execPath, [RUNNER, ...args], { maxBuffer: 64 * 1024 * 1024 }, (err, stdout) => err ? reject(err) : resolve(stdout));
+    child.stdin.end(input || "");
+  });
+  assert.equal(JSON.parse(await run(["poll", begun.session_dir])).review.raw_markdown, big);
+  const value = "w".repeat(100000) + "END-OF-VALUE";
+  const rendered = await run(["render", "--skill", "review-plan", "--template", "round1", "--skills-dir", SKILLS_DIR],
+    JSON.stringify({ PLAN_PATH: value, USER_REQUEST: "r", SESSION_CONTEXT: "c" }));
+  assert.ok(rendered.includes("END-OF-VALUE"), `render output cut at ${rendered.length} characters`);
 });
 
 // ---------- end ----------

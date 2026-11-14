@@ -3,6 +3,9 @@
 // FAKE_CODEX_SLOW_MS keeps it running (after some progress events) for that long.
 // FAKE_CODEX_FAIL fails the turn after the thread started, with that message (e.g. a usage limit).
 // FAKE_CODEX_TERM_LINE keeps running and, when terminated (SIGTERM), writes one more event before exiting.
+// FAKE_CODEX_CMDS prints that many long command pairs (started + completed), then waits for the file
+// FAKE_CODEX_GATE (if set), prints as many again and ends the turn; FAKE_CODEX_NO_THREAD holds the
+// thread id back until the gate opens.
 // FAKE_CODEX_STEPS prints that many reasoning events, FAKE_CODEX_STEP_MS apart, before the turn ends.
 import { writeFakeCli } from "./fake-cli.js";
 
@@ -29,6 +32,28 @@ if (process.env.FAKE_CODEX_TERM_LINE) {
     process.exit(0);
   });
   setInterval(() => {}, 1000);
+  return;
+}
+const cmds = parseInt(process.env.FAKE_CODEX_CMDS || "0", 10);
+if (cmds > 0) {
+  const line = e => fs.writeSync(1, JSON.stringify(e) + "\\n");
+  const thread = { type: "thread.started", thread_id: "thread-fake-1" };
+  const burst = first => {
+    for (let i = first; i < first + cmds; i++) {
+      const item = { id: "cmd_" + i, type: "command_execution", command: "cmd-" + i + " " + "x".repeat(400) };
+      line({ type: "item.started", item });
+      line({ type: "item.completed", item: { ...item, exit_code: 0 } });
+    }
+  };
+  if (!process.env.FAKE_CODEX_NO_THREAD) line(thread);
+  line({ type: "turn.started" });
+  burst(1);
+  const gate = process.env.FAKE_CODEX_GATE;
+  while (gate && !fs.existsSync(gate)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+  if (process.env.FAKE_CODEX_NO_THREAD) line(thread);
+  burst(cmds + 1);
+  line({ type: "item.completed", item: { type: "agent_message", text } });
+  line({ type: "turn.completed" });
   return;
 }
 const slowMs = parseInt(process.env.FAKE_CODEX_SLOW_MS || "0", 10);
