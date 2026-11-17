@@ -213,7 +213,8 @@ export const GITIGNORE = { ignore: "*\n", track: "*\n!plans/\n!plans/**\n" };
 /**
  * Make <ws>/.cross-review/.gitignore ignore or keep plans. Only a missing file or one of the
  * two the pack writes is changed; a file edited by hand is left alone ("custom").
- * Returns "created" | "updated" | "unchanged" | "custom".
+ * A workspace folder that no longer exists is left alone ("missing").
+ * Returns "created" | "updated" | "unchanged" | "custom" | "missing".
  */
 export function syncGitignore(ws, track) {
   const dir = path.join(ws, ".cross-review");
@@ -227,7 +228,13 @@ export function syncGitignore(ws, track) {
   }
   if (have === want) return "unchanged";
   if (have !== null && have !== GITIGNORE.ignore && have !== GITIGNORE.track) return "custom";
-  fs.mkdirSync(dir, { recursive: true });
+  try {
+    fs.mkdirSync(dir);
+  } catch (e) {
+    // not recursive: the dashboard may still list a worktree removed since its last scan
+    if (e.code === "ENOENT") return "missing";
+    if (e.code !== "EEXIST") throw e;
+  }
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, want);
   fs.renameSync(tmp, file);

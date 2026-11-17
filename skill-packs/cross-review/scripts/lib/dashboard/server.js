@@ -828,7 +828,7 @@ export async function startDashboard({
       watcher.forgetGit(abs);
       let blockedBy = null;
       let warning = null;
-      if (track && result !== "error") {
+      if (track && result !== "error" && result !== "missing") {
         const facts = gitPlanFacts(abs, []);
         if (facts.repo && facts.newPlansIgnored) blockedBy = facts.blockedBy || "a .gitignore rule";
         // the runner's sentence, so loop-plan and Settings say the same thing

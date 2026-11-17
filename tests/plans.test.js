@@ -225,6 +225,12 @@ test("syncGitignore: created, updated, unchanged, custom — checked with git it
   assert.deepEqual(fs.readdirSync(path.dirname(gi)).filter(f => f.includes(".tmp")), []);
 });
 
+test("syncGitignore: a deleted workspace (a removed worktree) is not created again", () => {
+  const ws = path.join(gitRepo("gone"), ".claude", "worktrees", "removed");
+  for (const track of [true, false]) assert.equal(syncGitignore(ws, track), "missing");
+  assert.equal(fs.existsSync(path.dirname(ws)), false);
+});
+
 test("ensureCrossReviewDir follows track_plans; a broken config keeps the file it finds", () => {
   const ws = dir("ensure");
   put(workspaceConfigPath(ws), { track_plans: true });
