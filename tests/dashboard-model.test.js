@@ -388,6 +388,41 @@ test("each session's inputs split on the placeholders of its own prompts directo
   assert.equal(inputValues(raw, "review-impl", custom).API, "Invented separate parameter.");
 });
 
+// ---------- the ended-session reader of the History archive ----------
+
+test("readSession logs:false reads no event log or line times and gives the same archive fields", () => {
+  const ARCHIVED = ["id", "skill", "title", "state", "rounds", "issues", "issueCount", "model", "reviewer", "reviewerSeconds", "createdAt"];
+  const pick = s => Object.fromEntries(ARCHIVED.map(k => [k, s[k]]));
+  const isLog = f => /output(-round-\d+)?\.jsonl$|times-round-\d+\.jsonl$/.test(String(f));
+  const count = fn => {
+    const realOpen = fs.openSync;
+    const realRead = fs.readFileSync;
+    let n = 0;
+    fs.openSync = function (f, ...rest) {
+      if (isLog(f)) n++;
+      return realOpen.call(this, f, ...rest);
+    };
+    fs.readFileSync = function (f, ...rest) {
+      if (isLog(f)) n++;
+      return realRead.call(this, f, ...rest);
+    };
+    try {
+      return { out: fn(), n };
+    } finally {
+      fs.openSync = realOpen;
+      fs.readFileSync = realRead;
+    }
+  };
+  for (const key of ["approved", "stalemate", "think", "endedOpen", "stoppedOld"]) {
+    const dir = fx.sessions[key];
+    const full = count(() => readSession(dir));
+    const light = count(() => readSession(dir, { logs: false }));
+    assert.ok(full.n > 0, `${key}: the default reader is the positive control`);
+    assert.equal(light.n, 0, `${key}: logs:false opened ${light.n} log files`);
+    assert.deepEqual(pick(classify(light.out, { now: fx.now, isAlive }).summary), pick(classify(full.out, { now: fx.now, isAlive }).summary), key);
+  }
+});
+
 // ---------- review checkpoint: incremental log reads (D5) ----------
 
 test("readSession reads only the bytes appended to output.jsonl since the last read; a replaced log is read again", () => {

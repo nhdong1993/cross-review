@@ -210,11 +210,16 @@ function activeRow(s) {
     <td class="num mono" data-since="${Number(s.since) || 0}">${clock(nowS() - s.since)}</td></tr>`;
 }
 
+const SUMMARY_ONLY = "Showing the last saved summary. This dashboard has not found the session's details (its folder may have been removed with a worktree).";
+
+/** An archived row: no page to open, and its model as recorded, never today's default. */
 function historyRow(s) {
-  return `<tr data-go="${esc(sessionHref(s.ws, s.id))}"><td>${st(s.state, s.label)}</td>
-    <td class="brk">${skillIc(s.skill)}${inline(s.title)}<div class="line2">${esc(`${s.wsName} · ${s.skill}`)}</div></td>
-    <td class="num">${s.rounds}</td><td class="soft">${esc(s.issues)}</td><td class="soft nw">${esc(modelOf(s))}</td>
-    <td class="num mono nw">${s.reviewerSeconds ? clock(s.reviewerSeconds) : "—"}</td><td class="num line2 nw">${esc(when(s.createdAt))}</td></tr>`;
+  const open = s.archived ? `title="${esc(SUMMARY_ONLY)}"` : `data-go="${esc(sessionHref(s.ws, s.id))}"`;
+  const model = s.archived ? s.model || `${own(REVIEWERS, s.reviewer) || s.reviewer} default` : modelOf(s);
+  return `<tr data-row ${open}><td>${st(s.state, s.label)}</td>
+    <td class="brk">${skillIc(s.skill)}${inline(s.title)}<div class="line2">${esc(`${s.wsName} · ${s.skill}${s.archived ? " · summary only" : ""}`)}</div></td>
+    <td class="num">${s.rounds}</td><td class="soft">${esc(s.issues)}</td><td class="soft nw">${esc(model)}</td>
+    <td class="num mono nw">${s.reviewerSeconds ? clock(s.reviewerSeconds) : "—"}</td><td class="num line2 nw">${esc(when(s.endedAt || s.since || s.createdAt))}</td></tr>`;
 }
 
 const EMPTY_ACTIVE = `<tr class="empty"><td colspan="4"><div class="empty-state">Nothing in progress.</div></td></tr>`;
@@ -222,9 +227,11 @@ const EMPTY_ACTIVE = `<tr class="empty"><td colspan="4"><div class="empty-state"
 function renderFilters(id = "#f-ws") {
   const sel = $(id);
   const keep = sel.value;
+  // History also filters by a removed worktree's archived rows; Plans only by live workspaces
+  const list = id === "#f-ws" ? [...data.workspaces, ...(data.archivedWorkspaces || [])] : data.workspaces;
   sel.innerHTML = `<option value="">All workspaces</option>` +
-    data.workspaces.map(w => `<option value="${esc(w.ws)}" title="${esc(w.path)}">${esc(w.name)}</option>`).join("");
-  sel.value = data.workspaces.some(w => w.ws === keep) ? keep : "";
+    list.map(w => `<option value="${esc(w.ws)}" title="${esc(w.path)}">${esc(w.name)}</option>`).join("");
+  sel.value = list.some(w => w.ws === keep) ? keep : "";
 }
 
 // Pages that fit the window (user decisions 2026-10-15 for History, 2026-10-16 for Plans): from
@@ -262,7 +269,7 @@ function fitPage(pg, rows) {
   const budget = window.innerHeight - (parseFloat(getComputedStyle(main).paddingBottom) || 0) - footH
     - pager.getBoundingClientRect().height - (parseFloat(getComputedStyle(pager).marginTop) || 0);
   let fit = 0;
-  for (const row of $(pg.body).querySelectorAll("tr[data-go]")) {
+  for (const row of $(pg.body).querySelectorAll("tr[data-row]")) {
     if (row.getBoundingClientRect().bottom + window.scrollY > budget) break;
     fit++;
   }
@@ -358,7 +365,7 @@ function reviewCell(p) {
 
 function planRow(p) {
   const sub = `${p.wsName} · ${p.file} · ${gitShort(p.tracked)}`;
-  return `<tr data-go="${esc(planHref(p.ws, p.file))}"><td>${st(own(PLAN_KIND, p.state) || "draft", planLabel(p))}</td>
+  return `<tr data-row data-go="${esc(planHref(p.ws, p.file))}"><td>${st(own(PLAN_KIND, p.state) || "draft", planLabel(p))}</td>
     <td>${inline(p.title)}<div class="line2">${esc(sub)}</div></td>
     <td>${p.format === "loop-plan" ? pbar(p.bar) : `<span class="soft">—</span>`}<div class="line2">${esc(progressText(p))}</div></td>
     <td>${reviewCell(p)}</td><td class="num line2 nw">${esc(changed(p.changedAt))}</td></tr>`;
@@ -764,8 +771,9 @@ function threadHtml(d) {
     .join("");
 }
 
+// newest issue first, like the thread's newest round first (user decision 18/11/2026)
 function ledgerHtml(d) {
-  return d.ledger.map(i => {
+  return [...d.ledger].reverse().map(i => {
     const trail = [...i.trail.map(esc), ...(i.pending ? [`<b>${esc(i.pending)}</b>`] : [])].join(" <i>→</i> ");
     const sev = i.severity ? `<span class="sev ${esc(i.severity)}">${esc(i.severity)}</span>` : "";
     return `<div class="iss" data-issue-go="${Number(i.id)}"><div class="it">ISSUE-${Number(i.id)}${sev}</div>

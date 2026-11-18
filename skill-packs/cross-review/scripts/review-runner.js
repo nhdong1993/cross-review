@@ -9,6 +9,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
@@ -979,6 +980,8 @@ function cmdInit(argv) {
   const now = Math.floor(Date.now() / 1000);
   const initialState = {
     session_id: sessionId,
+    // names this session's summary in ~/.cross-review/history, which outlives the session folder
+    history_key: crypto.randomUUID(),
     runner_version: RUNNER_VERSION,
     skill_name: skillName,
     reviewer: reviewer.name,

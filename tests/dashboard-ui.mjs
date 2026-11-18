@@ -214,6 +214,7 @@ try {
     earlier: document.getElementById("earlier").textContent,
     count: document.getElementById("act-count").textContent,
     ledger: document.getElementById("ledger").textContent,
+    ledgerIds: [...document.querySelectorAll("#ledger .iss")].map(e => e.dataset.issueGo),
     avatars: [...document.querySelectorAll("#thread .mark img")].every(i => i.complete && i.naturalWidth > 0),
     clock: document.querySelector("#status .next .run-clock")?.textContent,
     rounds: [...document.querySelectorAll("#thread .round-label")].map(l => l.textContent),
@@ -245,6 +246,7 @@ try {
   assert.equal(run.earlier, "show 20 earlier");
   assert.equal(run.count, "latest 20 of 45 events");
   assert.match(run.ledger, /checking now/);
+  assert.deepEqual(run.ledgerIds, ["3", "2", "1"], "newest issue first");
   assert.ok(run.avatars, "default avatars load");
   assert.match(run.clock, /^\d+:\d\d$/);
   assert.equal(run.inlineStyle, 0);
@@ -630,11 +632,22 @@ try {
       rounds: [{ status: "completed", started: manyNow - 1000 - i * 60, elapsed: 1, review: "### VERDICT\n- Status: APPROVE\n- Reason: Invented approval.\n" }],
     });
   }
+  // Five archived summaries of a removed worktree mixed in: counted by the pager, not clickable
+  const histDir = path.join(process.env.HOME, ".cross-review", "history");
+  fs.mkdirSync(histDir, { recursive: true });
+  for (let i = 0; i < 5; i++) {
+    const key = `00000000-0000-4000-8000-${String(500 + i).padStart(12, "0")}`;
+    fs.writeFileSync(path.join(histDir, `${key}.json`), JSON.stringify({
+      v: 1, history_key: key, id: `review-impl-20261015-${500 + i}`, skill: "review-impl", workspace: path.join(manyRoot, "gone-wt"),
+      title: `Invented archived request ${i}.`, state: "approve", rounds: 1, issues: "No issues", issueCount: 0,
+      model: null, reviewer: "codex", reviewerSeconds: 1, createdAt: manyNow - 1030 - i * 600, endedAt: manyNow - 1000 - i * 600,
+    }));
+  }
   const d3 = await startDashboard({ root: manyRoot, port: 0, open: false, discoveryFile: null, catalogs });
   const many = await browser.newPage(1400, 1200);
   try {
     await many.goto(`${d3.url}#/`);
-    await many.waitFor(`/ of 40/.test(document.getElementById("h-pager").textContent)`);
+    await many.waitFor(`/ of 45/.test(document.getElementById("h-pager").textContent)`);
     const pageOf = () => many.evaluate(`({
       range: document.getElementById("h-pager").querySelector("span").textContent,
       scrolls: document.documentElement.scrollHeight > window.innerHeight + 1,
@@ -644,17 +657,37 @@ try {
     for (let guard = 0; guard < 40; guard++) {
       const p = await pageOf();
       assert.equal(p.scrolls, false, `page ${p.range} fits the window`);
-      const [from, to] = p.range.replace(/ of 40$/, "").split("–").map(Number);
+      const [from, to] = p.range.replace(/ of 45$/, "").split("–").map(Number);
       assert.equal(from, seen.length ? seen[seen.length - 1][1] + 1 : 1, `pages continue: ${JSON.stringify(seen)} then ${p.range}`);
       seen.push([from, to]);
       if (!p.older) break;
       await many.evaluate(`document.querySelector('#h-pager a[data-hpage="1"]').click()`);
     }
-    assert.equal(seen[seen.length - 1][1], 40);
+    assert.equal(seen[seen.length - 1][1], 45);
     assert.ok(seen.length >= 3, JSON.stringify(seen));
     await many.evaluate(`document.querySelector('#h-pager a[data-hpage="-1"]').click()`);
     const back = await pageOf();
-    assert.equal(back.range, `${seen[seen.length - 2][0]}–${seen[seen.length - 2][1]} of 40`);
+    assert.equal(back.range, `${seen[seen.length - 2][0]}–${seen[seen.length - 2][1]} of 45`);
+
+    // The removed worktree is a History filter option; the choice survives a list update
+    const pick = await many.evaluate(`(() => {
+      const f = document.getElementById("f-ws");
+      f.value = "gone-wt";
+      f.dispatchEvent(new Event("change"));
+      const rows = [...document.querySelectorAll("#history tr[data-row]")];
+      return { value: f.value, rows: rows.length, clickable: rows.filter(r => r.dataset.go).length,
+        line2: rows[0].children[1].querySelector(".line2").textContent, model: rows[0].children[4].textContent,
+        plans: [...document.getElementById("pf-ws").options].some(o => o.value === "gone-wt") };
+    })()`);
+    assert.deepEqual(pick, { value: "gone-wt", rows: 5, clickable: 0, line2: "gone-wt · review-impl · summary only", model: "Codex default", plans: false });
+    // a new workspace reaches the page at the next rescan: the filter is rebuilt around the choice
+    writeSession(path.join(manyRoot, "late-ws", ".cross-review", "sessions"), "review-impl-20261015-499", {
+      skill: "review-impl", mode: "branch", created: manyNow, meta: "APPROVE", inputs: ["## USER_REQUEST\nInvented late request.\n"],
+      rounds: [{ status: "completed", started: manyNow, elapsed: 1, review: "### VERDICT\n- Status: APPROVE\n- Reason: Invented approval.\n" }],
+    });
+    await many.waitFor(`[...document.getElementById("f-ws").options].some(o => o.value === "late-ws")`, 20000);
+    assert.equal(await many.evaluate(`document.getElementById("f-ws").value`), "gone-wt", "the archived workspace stays selected after an update");
+    assert.equal(await many.evaluate(`document.querySelectorAll("#history tr[data-row]").length`), 5);
   } finally {
     await d3.close();
   }

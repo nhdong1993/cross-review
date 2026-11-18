@@ -639,6 +639,172 @@ test("peer end with outcome consensus finalizes as CONSENSUS; without outcome on
   assert.ok(!fs.existsSync(path.join(b.session_dir, "meta.json")));
 });
 
+// ---------- history archive: a summary that outlives the session folder ----------
+
+const historyDir = () => path.join(process.env.HOME, ".cross-review", "history");
+const archiveOf = dir => {
+  const key = JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8")).history_key;
+  return { key, file: path.join(historyDir(), `${key}.json`) };
+};
+const ARCHIVE_FIELDS = ["createdAt", "endedAt", "history_key", "id", "issueCount", "issues", "model", "reviewer", "reviewerSeconds", "rounds", "skill", "state", "title", "v", "workspace"];
+
+test("end archives one allow-listed summary per session under ~/.cross-review/history", async () => {
+  setCodexOutput("### VERDICT\n- Status: APPROVE\n- Reason: ok\n");
+  const begun = await beginSession({ skill: "review-plan", inputText: inputFor("review-plan", "ha"), workingDir: workDir });
+  await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
+  const ended = await endSession(begun.session_dir);
+  assert.equal(ended.archive_warning, undefined);
+  const { key, file } = archiveOf(begun.session_dir);
+  assert.match(key, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+  const rec = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.deepEqual(Object.keys(rec).sort(), ARCHIVE_FIELDS);
+  assert.equal(rec.v, 1);
+  assert.equal(rec.id, path.basename(begun.session_dir));
+  assert.equal(rec.state, "approve");
+  assert.equal(rec.rounds, 1);
+  assert.equal(rec.workspace, fs.realpathSync(workDir));
+  assert.equal(typeof rec.endedAt, "number");
+  if (process.platform !== "win32") {
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+    assert.equal(fs.statSync(historyDir()).mode & 0o777, 0o700);
+  }
+});
+
+test("an end that only stops archives state stopped", async () => {
+  setCodexOutput("### ISSUE-1: x\n- Severity: high\n\n### VERDICT\n- Status: REVISE\n");
+  const begun = await beginSession({ skill: "review-plan", inputText: inputFor("review-plan", "hs"), workingDir: workDir });
+  await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
+  await endSession(begun.session_dir);
+  assert.equal(JSON.parse(fs.readFileSync(archiveOf(begun.session_dir).file, "utf8")).state, "stopped");
+});
+
+test("end, reply, end rewrites the same archive with the latest close", async () => {
+  setCodexOutput("### ISSUE-1: x\n- Severity: low\n\n### Overall Assessment\n- Code quality: ok\n\n### VERDICT\n- Status: CONSENSUS\n");
+  const begun = await beginSession({ skill: "review-pr", inputText: inputFor("review-pr", "hr"), workingDir: workDir });
+  await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
+  await endSession(begun.session_dir, { outcome: "consensus" });
+  const { file } = archiveOf(begun.session_dir);
+  const first = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(first.state, "consensus");
+  assert.equal(first.rounds, 1);
+  await replySession(begun.session_dir, { inputText: inputFor("review-pr", "hr2") });
+  await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
+  await endSession(begun.session_dir);
+  assert.equal(archiveOf(begun.session_dir).file, file);
+  const second = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(second.state, "stopped");
+  assert.equal(second.rounds, 2);
+  assert.equal(fs.readdirSync(historyDir()).filter(f => f.startsWith(first.history_key)).length, 1);
+});
+
+test("end gives a session from before history_key one key on its first end", async () => {
+  setCodexOutput("### VERDICT\n- Status: APPROVE\n- Reason: ok\n");
+  const begun = await beginSession({ skill: "review-plan", inputText: inputFor("review-plan", "hl"), workingDir: workDir });
+  await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
+  const stateFile = path.join(begun.session_dir, "state.json");
+  const st = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  delete st.history_key;
+  fs.writeFileSync(stateFile, JSON.stringify(st));
+  await endSession(begun.session_dir);
+  const { key, file } = archiveOf(begun.session_dir);
+  assert.ok(key);
+  assert.ok(fs.existsSync(file));
+});
+
+test("a blocked archive path is a warning, never an end error", async () => {
+  setCodexOutput("### VERDICT\n- Status: APPROVE\n- Reason: ok\n");
+  const begun = await beginSession({ skill: "review-plan", inputText: inputFor("review-plan", "hb"), workingDir: workDir });
+  await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
+  const saved = historyDir() + ".saved";
+  if (fs.existsSync(historyDir())) fs.renameSync(historyDir(), saved);
+  fs.mkdirSync(path.dirname(historyDir()), { recursive: true });
+  fs.writeFileSync(historyDir(), "not a folder");
+  try {
+    const ended = await endSession(begun.session_dir);
+    assert.equal(ended.finalized, true);
+    assert.equal(ended.error, undefined);
+    assert.ok(ended.archive_warning);
+    const st = JSON.parse(fs.readFileSync(path.join(begun.session_dir, "state.json"), "utf8"));
+    assert.equal(st.end_outcome, "finalized");
+    assert.ok(st.ended_at);
+  } finally {
+    fs.rmSync(historyDir(), { force: true });
+    if (fs.existsSync(saved)) fs.renameSync(saved, historyDir());
+  }
+});
+
+test("the archive uses the key the session got at init, and makes an existing history folder private", async () => {
+  setCodexOutput("### VERDICT\n- Status: APPROVE\n- Reason: ok\n");
+  if (process.platform !== "win32") {
+    fs.mkdirSync(historyDir(), { recursive: true });
+    fs.chmodSync(historyDir(), 0o755);
+  }
+  const begun = await beginSession({ skill: "review-plan", inputText: inputFor("review-plan", "hk"), workingDir: workDir });
+  const initKey = JSON.parse(fs.readFileSync(path.join(begun.session_dir, "state.json"), "utf8")).history_key;
+  assert.match(String(initKey), /^[0-9a-f-]{36}$/);
+  await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
+  await endSession(begun.session_dir);
+  assert.ok(fs.existsSync(path.join(historyDir(), `${initKey}.json`)));
+  if (process.platform !== "win32") assert.equal(fs.statSync(historyDir()).mode & 0o777, 0o700);
+});
+
+test("a malformed history_key or a blocked destination warns, writes nothing and leaves no temp file", async () => {
+  setCodexOutput("### VERDICT\n- Status: APPROVE\n- Reason: ok\n");
+  const a = await beginSession({ skill: "review-plan", inputText: inputFor("review-plan", "hm"), workingDir: workDir });
+  await waitSession(a.session_dir, { maxWaitSeconds: 30 });
+  const stateFile = path.join(a.session_dir, "state.json");
+  const key = JSON.parse(fs.readFileSync(stateFile, "utf8")).history_key;
+  fs.writeFileSync(stateFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(stateFile, "utf8")), history_key: [key] }));
+  const endedA = await endSession(a.session_dir);
+  assert.ok(endedA.archive_warning);
+  assert.equal(endedA.error, undefined);
+  assert.ok(!fs.existsSync(path.join(historyDir(), `${key}.json`)));
+
+  const b = await beginSession({ skill: "review-plan", inputText: inputFor("review-plan", "ht"), workingDir: workDir });
+  await waitSession(b.session_dir, { maxWaitSeconds: 30 });
+  const keyB = JSON.parse(fs.readFileSync(path.join(b.session_dir, "state.json"), "utf8")).history_key;
+  fs.mkdirSync(path.join(historyDir(), `${keyB}.json`), { recursive: true });
+  try {
+    const endedB = await endSession(b.session_dir);
+    assert.ok(endedB.archive_warning);
+    assert.deepEqual(fs.readdirSync(historyDir()).filter(f => f.endsWith(".tmp")), []);
+  } finally {
+    fs.rmSync(path.join(historyDir(), `${keyB}.json`), { recursive: true, force: true });
+  }
+});
+
+test("a linked history folder is refused and its target keeps its mode", { skip: process.platform === "win32" }, async () => {
+  setCodexOutput("### VERDICT\n- Status: APPROVE\n- Reason: ok\n");
+  const begun = await beginSession({ skill: "review-plan", inputText: inputFor("review-plan", "hn"), workingDir: workDir });
+  await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
+  const saved = historyDir() + ".saved";
+  if (fs.existsSync(historyDir())) fs.renameSync(historyDir(), saved);
+  const target = path.join(tmp, "shared-folder");
+  fs.mkdirSync(target, { recursive: true });
+  fs.chmodSync(target, 0o755);
+  fs.mkdirSync(path.dirname(historyDir()), { recursive: true });
+  fs.symlinkSync(target, historyDir());
+  try {
+    const ended = await endSession(begun.session_dir);
+    assert.ok(ended.archive_warning);
+    assert.equal(fs.statSync(target).mode & 0o777, 0o755);
+    assert.deepEqual(fs.readdirSync(target), []);
+  } finally {
+    fs.rmSync(historyDir(), { force: true });
+    if (fs.existsSync(saved)) fs.renameSync(saved, historyDir());
+  }
+});
+
+test("an end through a folder alias archives the session's real id", { skip: process.platform === "win32" }, async () => {
+  setCodexOutput("### VERDICT\n- Status: APPROVE\n- Reason: ok\n");
+  const begun = await beginSession({ skill: "review-plan", inputText: inputFor("review-plan", "hy"), workingDir: workDir });
+  await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
+  const alias = path.join(tmp, "session-link");
+  fs.symlinkSync(begun.session_dir, alias);
+  await endSession(alias);
+  assert.equal(JSON.parse(fs.readFileSync(archiveOf(begun.session_dir).file, "utf8")).id, path.basename(begun.session_dir));
+});
+
 test("CLI end exits non-zero when finalize fails", async () => {
   setCodexOutput("### VERDICT\n- Status: APPROVE\n");
   const begun = await beginSession({ skill: "review-plan", inputText: inputFor("review-plan", "ef"), workingDir: workDir });

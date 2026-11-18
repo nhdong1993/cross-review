@@ -16,7 +16,8 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { classify, inputValues, readSession, roundActivity } from "./model.js";
+import { classify, inputValues, LABELS, readSession, roundActivity } from "./model.js";
+import { historyDir, loadHistory } from "../history.js";
 import { findWorkspaces, isWorkspace, listSessions, sessionsDir, SCAN_DEPTH, SESSION_ID_RE } from "./scan.js";
 import { discoveryFile, removeDiscoveryIfOwn, writeDiscovery } from "./discovery.js";
 import { keptToken } from "./token.js";
@@ -134,6 +135,11 @@ export function createListWatcher({ root, now = () => Math.floor(Date.now() / 10
   let planIndex = new Map(); // `${ws}\0${file}` → what /api/plan needs, from the last build
   let lastScan = 0;
   let timer = null;
+  let archive = { stamp: null, records: [] }; // ~/.cross-review/history, read again when the folder changes
+  let scoped = null; // archive records in scope, recomputed when the archive or the followed folders change
+  // shortcut: every folder followed since start stays an archive scope (a removed external
+  // worktree keeps its History rows) until restart; persist the list if they must survive restarts
+  const followed = new Set();
 
   function wsKey(abs) {
     const rel = path.relative(realRoot, abs);
@@ -147,7 +153,43 @@ export function createListWatcher({ root, now = () => Math.floor(Date.now() / 10
     for (const ws of findWorkspaces(realRoot, depth)) scanned.set(wsKey(ws), ws);
     // a registered folder that was deleted (a merged worktree) leaves the list
     for (const [k, v] of registered) if (!isWorkspace(v)) registered.delete(k);
+    loadArchive();
     lastScan = Date.now();
+  }
+
+  // shortcut: a rewrite landing on the folder's last mtime stays unseen until the folder changes
+  // again or the dashboard restarts; upgrade to reading every file if that matters
+  function loadArchive() {
+    const dir = historyDir();
+    try {
+      const st = fs.statSync(dir);
+      if (!st.isDirectory()) throw new Error("not a folder");
+      // a folder we can list and read through; a permission change alone leaves its mtime alone
+      fs.accessSync(dir, fs.constants.R_OK | fs.constants.X_OK);
+      if (archive.stamp === st.mtimeMs) return;
+      archive = { stamp: st.mtimeMs, records: loadHistory(dir) };
+    } catch {
+      // missing, not a folder, or unreadable: no archive, and the next rescan tries again
+      archive = { stamp: null, records: [] };
+    }
+    scoped = null;
+  }
+
+  /** Archived summaries whose workspace is under the root or a folder followed since start. */
+  function archiveInScope() {
+    if (scoped) return scoped;
+    const under = (p, base) => {
+      const rel = path.relative(base, p);
+      return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
+    };
+    const bases = [realRoot, ...followed];
+    const inScope = new Map(); // workspace → bool: many records share one workspace
+    const ok = ws => {
+      if (!inScope.has(ws)) inScope.set(ws, bases.some(b => under(ws, b)));
+      return inScope.get(ws);
+    };
+    scoped = archive.records.filter(r => ok(r.workspace));
+    return scoped;
   }
 
   function workspaces() {
@@ -313,17 +355,14 @@ export function createListWatcher({ root, now = () => Math.floor(Date.now() / 10
   function build(listing = true) {
     const t = now();
     const wsMap = workspaces();
-    const names = new Map();
-    for (const abs of wsMap.values()) names.set(path.basename(abs), (names.get(path.basename(abs)) || 0) + 1);
     const list = [];
     const active = [];
     const history = [];
     const seen = new Set();
+    const liveKeys = new Set();
     const sessionsByWs = new Map(); // ws → id → { parsed, summary, abs }
-    const nameOf = (abs, ws) => (names.get(path.basename(abs)) > 1 ? ws : path.basename(abs));
     for (const [ws, abs] of wsMap) {
-      const name = nameOf(abs, ws);
-      list.push({ ws, name, path: abs });
+      list.push({ ws, path: abs });
       const here = new Map();
       sessionsByWs.set(ws, here);
       for (const dir of listSessions(abs)) {
@@ -337,17 +376,37 @@ export function createListWatcher({ root, now = () => Math.floor(Date.now() / 10
           continue;
         }
         cache.get(dir).settled = summary.group !== "active";
-        (summary.group === "active" ? active : history).push({ ...summary, ws, wsName: name });
+        if (parsed.state.history_key) liveKeys.add(parsed.state.history_key);
+        // endedAt: History's finish time is the close, as in the archived copy of the same session
+        (summary.group === "active" ? active : history).push({ ...summary, ws, endedAt: parsed.state.ended_at || null });
         here.set(summary.id, { parsed, summary, abs });
       }
     }
+    // archived summaries of sessions not listed live; their workspaces that are not live either
+    // (a removed worktree) get History rows and a filter option, nothing else
+    const goneWs = new Map();
+    for (const r of archiveInScope()) {
+      if (liveKeys.has(r.history_key)) continue;
+      const ws = wsKey(r.workspace);
+      if (!wsMap.has(ws)) goneWs.set(ws, r.workspace);
+      history.push({ ...r, ws, group: "history", since: r.endedAt || r.createdAt, label: LABELS[r.state], archived: true, searchText: r.title.toLowerCase() });
+    }
+    const absOf = new Map([...wsMap, ...goneWs]);
+    const names = new Map();
+    for (const abs of absOf.values()) names.set(path.basename(abs), (names.get(path.basename(abs)) || 0) + 1);
+    const nameOf = (abs, ws) => (names.get(path.basename(abs)) > 1 ? ws : path.basename(abs));
+    for (const w of list) w.name = nameOf(w.path, w.ws);
+    for (const s of [...active, ...history]) s.wsName = nameOf(absOf.get(s.ws), s.ws);
+    const archivedWorkspaces = [...goneWs].map(([ws, abs]) => ({ ws, name: nameOf(abs, ws), path: abs })).sort((a, b) => a.ws.localeCompare(b.ws));
     const plans = buildPlans(wsMap, nameOf, sessionsByWs);
     for (const dir of cache.keys()) if (!seen.has(dir)) cache.delete(dir);
     const byId = (a, b) => (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
     active.sort((a, b) => (b.since || 0) - (a.since || 0) || byId(a, b));
-    history.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0) || byId(a, b));
+    // newest finish first (user decision 18/11/2026): a long review that just ended stays on top
+    const finished = s => s.endedAt || s.since || s.createdAt || 0;
+    history.sort((a, b) => finished(b) - finished(a) || byId(a, b));
     list.sort((a, b) => a.ws.localeCompare(b.ws));
-    return { root: realRoot, rootDisplay: tildePath(realRoot), depth, version, workspaces: list, active, history, plans };
+    return { root: realRoot, rootDisplay: tildePath(realRoot), depth, version, workspaces: list, archivedWorkspaces, active, history, plans };
   }
 
   function send(sub, payload, json) {
@@ -398,6 +457,10 @@ export function createListWatcher({ root, now = () => Math.floor(Date.now() / 10
       if (!isWorkspace(abs)) throw new Error("the folder has no .cross-review/sessions or plans");
       const key = wsKey(abs);
       registered.set(key, abs);
+      if (!followed.has(abs)) {
+        followed.add(abs);
+        scoped = null;
+      }
       return key;
     },
     /** Session dir for (ws, id), or null when either is unknown. */
@@ -850,7 +913,9 @@ export async function startDashboard({
     const p = watcher.snapshot();
     const callers = new Map();
     let without = 0;
-    for (const s of [...p.active, ...p.history]) {
+    // archived summaries keep no caller: they would all count as an unknown agent
+    const sessions = [...p.active, ...p.history.filter(s => !s.archived)];
+    for (const s of sessions) {
       if (!s.caller) {
         without++;
         continue;
@@ -863,8 +928,8 @@ export async function startDashboard({
     const parties = [{ key: "you", who: "us", label: "You", seenIn: "every session" }];
     // A party per reviewer the sessions used; the default one even before any session
     const byReviewer = new Map();
-    for (const s of [...p.active, ...p.history]) byReviewer.set(s.reviewer, (byReviewer.get(s.reviewer) || 0) + 1);
-    const total = p.active.length + p.history.length;
+    for (const s of sessions) byReviewer.set(s.reviewer, (byReviewer.get(s.reviewer) || 0) + 1);
+    const total = sessions.length;
     for (const name of REVIEWER_NAMES) {
       const n = byReviewer.get(name) || 0;
       if (!n && !(name === DEFAULT_REVIEWER && !total)) continue;

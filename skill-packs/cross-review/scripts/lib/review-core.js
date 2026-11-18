@@ -6,6 +6,7 @@
 // and by the MCP server.
 
 import { execFile } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -579,5 +580,15 @@ export async function endSession(sessionDir, { outcome } = {}) {
   const out = { status: "ended", session_dir: sessionDir, finalized };
   if (verdict) out.verdict = verdict;
   if (error) out.error = error;
+  // The History summary is optional: its failure never makes the end itself an error
+  try {
+    // shortcut: a session from before history_key gets one here, read-then-write; two ends of the
+    // same old session at once can leave two files. Only sessions started before this version.
+    if (!readState(sessionDir).history_key) updateState(sessionDir, { history_key: crypto.randomUUID() });
+    const { archiveSession } = await import("./history.js");
+    archiveSession(sessionDir, { finalized });
+  } catch (e) {
+    out.archive_warning = `History summary not saved: ${e.message}`;
+  }
   return out;
 }

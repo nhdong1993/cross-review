@@ -138,9 +138,10 @@ function cleanLocation(loc) {
 
 /**
  * Read one session directory. Returns null when it has no readable state.json.
- * Everything here depends only on file contents.
+ * Everything here depends only on file contents. `logs: false` skips the event logs and line
+ * times: enough for an ended session's summary.
  */
-export function readSession(dir) {
+export function readSession(dir, { logs = true } = {}) {
   const state = readJson(path.join(dir, "state.json"));
   if (!state || typeof state !== "object") return null;
   const id = path.basename(dir);
@@ -155,14 +156,15 @@ export function readSession(dir) {
   for (let r = 1; r <= n; r++) {
     const live = r === n;
     const final = readJson(live ? path.join(dir, "final.txt") : path.join(dir, "outputs", `final-round-${pad(r)}.json`));
-    const log = reviewer ? readLog(live ? path.join(dir, "output.jsonl") : path.join(dir, "outputs", `output-round-${pad(r)}.jsonl`), reviewer, r) : null;
+    const log = reviewer && logs ? readLog(live ? path.join(dir, "output.jsonl") : path.join(dir, "outputs", `output-round-${pad(r)}.jsonl`), reviewer, r) : null;
     const entry = roundEntries.find(e => e.round === r) || {};
     const items = log ? reviewer.logItems(log) : [];
-    const timed = attachTimes(items, readLineTimes(dir, r), entry.started_at || null)
+    const timed = attachTimes(items, logs ? readLineTimes(dir, r) : [], entry.started_at || null)
       .map(it => ({ ...it, ...humanize(it), key: `${r}:${it.id}`, round: r }));
     let outcome = null;
-    if (live && !final && reviewer) outcome = reviewer.logOutcome(log || reviewer.newLogState());
+    if (live && !final && reviewer && logs) outcome = reviewer.logOutcome(log || reviewer.newLogState());
     const lastTime = (() => {
+      if (!logs) return null;
       const rows = readLineTimes(dir, r);
       return rows.length ? rows[rows.length - 1][1] : null;
     })();

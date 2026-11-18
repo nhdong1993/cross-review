@@ -160,8 +160,8 @@ test("/api/sessions groups the fixture sessions with labels and order", async ()
       `services/orchard-api/${idOf(fx.sessions.warn)}`,
     ]);
     for (let i = 1; i < p.active.length; i++) assert.ok(p.active[i - 1].since >= p.active[i].since);
-    // history: newest created_at first
-    for (let i = 1; i < p.history.length; i++) assert.ok(p.history[i - 1].createdAt >= p.history[i].createdAt);
+    // History: newest finish first, so a long review that ended last is on top
+    for (let i = 1; i < p.history.length; i++) assert.ok((p.history[i - 1].since || p.history[i - 1].createdAt) >= (p.history[i].since || p.history[i].createdAt));
     assert.equal(p.history.length, 8);
     const label = key => find(p, idOf(fx.sessions[key])).label;
     assert.equal(label("running"), "reviewer working");
@@ -1683,4 +1683,343 @@ test("avatar parties per reviewer: one per reviewer the sessions used", async ()
   } finally {
     await d2.close();
   }
+});
+
+// ---------- History archive: summaries that outlive a removed worktree ----------
+
+/** Run fn with HOME (and USERPROFILE) set to a fresh folder, so each test owns its ~/.cross-review/history. */
+async function withHome(fn) {
+  const home = mk("archive-home");
+  const saved = [process.env.HOME, process.env.USERPROFILE];
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  try {
+    return await fn(path.join(home, ".cross-review", "history"));
+  } finally {
+    [process.env.HOME, process.env.USERPROFILE] = saved;
+  }
+}
+
+let keySeq = 0;
+const newKey = () => `00000000-0000-4000-8000-${String(++keySeq).padStart(12, "0")}`;
+/** A record shaped exactly as the runner writes it. */
+function archiveRecord(dir, over = {}) {
+  const r = {
+    v: 1, history_key: newKey(), id: "review-impl-20261015-901", skill: "review-impl", workspace: "/nowhere",
+    title: "An invented archived review.", state: "approve", rounds: 2, issues: "1: 1 fixed", issueCount: 1,
+    model: null, reviewer: "codex", reviewerSeconds: 90, createdAt: 1_800_000_000, endedAt: 1_800_000_100, ...over,
+  };
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `${r.history_key}.json`), JSON.stringify(r));
+  return r;
+}
+const archivedRows = p => p.history.filter(s => s.archived);
+const APPROVE = "### VERDICT\n- Status: APPROVE\n- Reason: Invented approval.\n";
+const childSession = (ws, id) => writeSession(path.join(ws, ".cross-review", "sessions"), id, {
+  // the fixture's default working_dir is one level up; the runner records the workspace itself
+  skill: "review-impl", created: nowS() - 600, inputs: ["## USER_REQUEST\nAn invented worktree change.\n"], meta: "APPROVE", state: { working_dir: ws, history_key: newKey() },
+  rounds: [{ status: "completed", started: nowS() - 500, elapsed: 30, review: APPROVE }],
+});
+
+test("archive: a session's row survives removing its whole worktree; live wins while the folder is there", async () => {
+  const { archiveSession } = await import("../skill-packs/cross-review/scripts/lib/history.js");
+  await withHome(async () => {
+    const root = mk("archive-root");
+    const parent = path.join(root, "parent");
+    fs.mkdirSync(path.join(parent, ".cross-review", "sessions"), { recursive: true });
+    const child = path.join(parent, "wt", "child");
+    const dir = childSession(child, "review-impl-20261015-801");
+    archiveSession(dir, { finalized: true });
+
+    const w1 = createListWatcher({ root });
+    try {
+      const p = w1.snapshot({ maxScanAgeMs: 0 });
+      assert.equal(p.history.filter(s => s.id === "review-impl-20261015-801").length, 1, "live and archive of one UUID: one row");
+      assert.equal(archivedRows(p).length, 0);
+    } finally {
+      w1.close();
+    }
+
+    fs.rmSync(path.join(parent, "wt"), { recursive: true, force: true });
+    const w2 = createListWatcher({ root });
+    try {
+      const p = w2.snapshot({ maxScanAgeMs: 0 });
+      const rows = archivedRows(p);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].id, "review-impl-20261015-801");
+      assert.equal(rows[0].label, "approved");
+      assert.equal(rows[0].ws, "parent/wt/child");
+      assert.equal(rows[0].title, "An invented worktree change.");
+      assert.ok(!p.workspaces.some(x => x.ws === "parent/wt/child"));
+      assert.deepEqual(p.archivedWorkspaces.map(x => x.ws), ["parent/wt/child"]);
+    } finally {
+      w2.close();
+    }
+  });
+});
+
+test("archive: same public id with different UUIDs keeps both rows", async () => {
+  await withHome(async hist => {
+    const root = mk("archive-ids");
+    archiveRecord(hist, { workspace: path.join(root, "a") });
+    archiveRecord(hist, { workspace: path.join(root, "b") });
+    const w = createListWatcher({ root });
+    try {
+      assert.equal(archivedRows(w.snapshot({ maxScanAgeMs: 0 })).length, 2);
+    } finally {
+      w.close();
+    }
+  });
+});
+
+test("archive: only workspaces under the root or a registered folder, never a prefix sibling", async () => {
+  await withHome(async hist => {
+    const root = mk("archive-scope");
+    const other = mk("archive-registered");
+    fs.mkdirSync(path.join(other, ".cross-review", "sessions"), { recursive: true });
+    archiveRecord(hist, { workspace: path.join(root, "in") });
+    archiveRecord(hist, { workspace: root });
+    archiveRecord(hist, { workspace: `${root}2` });
+    archiveRecord(hist, { workspace: path.join(other, "gone") });
+    archiveRecord(hist, { workspace: "/elsewhere/ws" });
+    const w = createListWatcher({ root });
+    try {
+      const ws = () => archivedRows(w.snapshot({ maxScanAgeMs: 0 })).map(s => s.workspace).sort();
+      assert.deepEqual(ws(), [root, path.join(root, "in")].sort());
+      w.addWorkspace(other);
+      assert.deepEqual(ws(), [root, path.join(root, "in"), path.join(other, "gone")].sort());
+    } finally {
+      w.close();
+    }
+  });
+});
+
+test("archive: broken, mistyped, non-final or unknown-version files are skipped, the valid one stays", async () => {
+  await withHome(async hist => {
+    const root = mk("archive-bad");
+    const good = archiveRecord(hist, { workspace: path.join(root, "ok") });
+    fs.writeFileSync(path.join(hist, "broken.json"), "{ not json");
+    archiveRecord(hist, { workspace: path.join(root, "x"), title: null });
+    archiveRecord(hist, { workspace: path.join(root, "y"), state: "waiting" });
+    archiveRecord(hist, { workspace: path.join(root, "z"), v: 2 });
+    archiveRecord(hist, { workspace: "relative/ws" });
+    const w = createListWatcher({ root });
+    try {
+      assert.deepEqual(archivedRows(w.snapshot({ maxScanAgeMs: 0 })).map(s => s.history_key), [good.history_key]);
+    } finally {
+      w.close();
+    }
+  });
+});
+
+test("archive: an unreadable history path keeps live rows; the same watcher follows delete and re-create", async () => {
+  await withHome(async hist => {
+    const root = mk("archive-life");
+    buildFixture(root, { now: nowS(), livePid: process.pid });
+    fs.mkdirSync(path.dirname(hist), { recursive: true });
+    fs.writeFileSync(hist, "not a folder");
+    const w = createListWatcher({ root });
+    try {
+      const snap = () => w.snapshot({ maxScanAgeMs: -1 });
+      const p0 = snap();
+      assert.ok(p0.history.length > 0, "live rows still listed");
+      assert.equal(archivedRows(p0).length, 0);
+      fs.rmSync(hist);
+      archiveRecord(hist, { workspace: path.join(root, "gone-a") });
+      assert.equal(archivedRows(snap()).length, 1, "recovers once the folder is valid");
+      fs.rmSync(hist, { recursive: true });
+      assert.equal(archivedRows(snap()).length, 0, "a removed history folder clears its rows");
+      archiveRecord(hist, { workspace: path.join(root, "gone-b") });
+      assert.equal(archivedRows(snap()).length, 1, "a re-created folder is read again");
+    } finally {
+      w.close();
+    }
+  });
+});
+
+test("archive: two removed worktrees with one basename get different names", async () => {
+  await withHome(async hist => {
+    const root = mk("archive-names");
+    archiveRecord(hist, { workspace: path.join(root, "a", "harbor") });
+    archiveRecord(hist, { workspace: path.join(root, "b", "harbor") });
+    const w = createListWatcher({ root });
+    try {
+      const p = w.snapshot({ maxScanAgeMs: 0 });
+      assert.deepEqual(archivedRows(p).map(s => s.wsName).sort(), ["a/harbor", "b/harbor"]);
+      assert.deepEqual(p.archivedWorkspaces.map(x => x.name).sort(), ["a/harbor", "b/harbor"]);
+    } finally {
+      w.close();
+    }
+  });
+});
+
+test("archive: Settings avatar counts leave archived rows out", async () => {
+  await withHome(async hist => {
+    const root = mk("archive-avatars");
+    archiveRecord(hist, { workspace: path.join(root, "gone"), reviewer: "claude" });
+    const d = await startDashboard({ root, port: 0, open: false, discoveryFile: null, catalogs: { codex: CATALOG } });
+    try {
+      const keys = (await getJson(d, "/api/avatars")).parties.map(p => p.key);
+      assert.ok(!keys.includes("agent:unknown"));
+      assert.ok(!keys.includes("reviewer:claude"));
+    } finally {
+      await d.close();
+    }
+  });
+});
+
+test("History: a long review that finished last is on top, even though it started first", async () => {
+  await withHome(async hist => {
+    const root = mk("history-order");
+    const longOne = archiveRecord(hist, { workspace: path.join(root, "a"), createdAt: 1_800_000_000, endedAt: 1_800_009_000 });
+    const quick = archiveRecord(hist, { workspace: path.join(root, "a"), createdAt: 1_800_005_000, endedAt: 1_800_005_100 });
+    const w = createListWatcher({ root });
+    try {
+      assert.deepEqual(w.snapshot({ maxScanAgeMs: 0 }).history.map(s => s.history_key), [longOne.history_key, quick.history_key]);
+    } finally {
+      w.close();
+    }
+  });
+});
+
+test("archive: a followed external worktree keeps its rows after it is deleted, on the same watcher", async () => {
+  await withHome(async hist => {
+    const root = mk("archive-ext-root");
+    const ext = mk("archive-ext");
+    fs.mkdirSync(path.join(ext, ".cross-review", "sessions"), { recursive: true });
+    archiveRecord(hist, { workspace: ext });
+    const w = createListWatcher({ root });
+    try {
+      w.addWorkspace(ext);
+      assert.equal(archivedRows(w.snapshot({ maxScanAgeMs: -1 })).length, 1);
+      fs.rmSync(ext, { recursive: true, force: true });
+      const p = w.snapshot({ maxScanAgeMs: -1 });
+      assert.equal(archivedRows(p).length, 1);
+      assert.ok(!p.workspaces.some(x => x.path === ext));
+    } finally {
+      w.close();
+    }
+  });
+});
+
+test("archive: a history folder that loses and regains read access is followed by the same watcher", { skip: process.platform === "win32" || process.getuid?.() === 0 }, async () => {
+  await withHome(async hist => {
+    const root = mk("archive-perm");
+    archiveRecord(hist, { workspace: path.join(root, "gone") });
+    const w = createListWatcher({ root });
+    try {
+      const rows = () => archivedRows(w.snapshot({ maxScanAgeMs: -1 })).length;
+      assert.equal(rows(), 1);
+      fs.chmodSync(hist, 0o300);
+      assert.equal(rows(), 0, "unreadable: no archived rows");
+      fs.chmodSync(hist, 0o400);
+      assert.equal(rows(), 0, "listable but not traversable: no archived rows");
+      fs.chmodSync(hist, 0o700);
+      assert.equal(rows(), 1, "readable again: back without a restart");
+    } finally {
+      fs.chmodSync(hist, 0o700);
+      w.close();
+    }
+  });
+});
+
+test("archive: a live session and an archived one with the same public id but different UUIDs both show", async () => {
+  await withHome(async hist => {
+    const root = mk("archive-same-id");
+    const ws = path.join(root, "ws");
+    childSession(ws, "review-impl-20261015-901");
+    archiveRecord(hist, { workspace: path.join(root, "gone"), id: "review-impl-20261015-901" });
+    const w = createListWatcher({ root });
+    try {
+      const rows = w.snapshot({ maxScanAgeMs: 0 }).history.filter(s => s.id === "review-impl-20261015-901");
+      assert.deepEqual(rows.map(s => Boolean(s.archived)).sort(), [false, true]);
+    } finally {
+      w.close();
+    }
+  });
+});
+
+test("archive: a copy of a summary under another file name is not a second row", async () => {
+  await withHome(async hist => {
+    const root = mk("archive-copy");
+    const r = archiveRecord(hist, { workspace: path.join(root, "gone") });
+    fs.copyFileSync(path.join(hist, `${r.history_key}.json`), path.join(hist, "copy.json"));
+    const w = createListWatcher({ root });
+    try {
+      assert.equal(archivedRows(w.snapshot({ maxScanAgeMs: 0 })).length, 1);
+    } finally {
+      w.close();
+    }
+  });
+});
+
+test("archive: a moved workspace's old summary is superseded by the live session and adds no filter option", async () => {
+  await withHome(async hist => {
+    const root = mk("archive-moved");
+    const now = path.join(root, "target", "one");
+    const key = newKey();
+    childSession(now, "review-impl-20261015-902");
+    const stateFile = path.join(now, ".cross-review", "sessions", "review-impl-20261015-902", "state.json");
+    fs.writeFileSync(stateFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(stateFile, "utf8")), history_key: key }));
+    const old = archiveRecord(hist, { workspace: path.join(root, "source", "one"), id: "review-impl-20261015-902" });
+    fs.renameSync(path.join(hist, `${old.history_key}.json`), path.join(hist, `${key}.json`));
+    fs.writeFileSync(path.join(hist, `${key}.json`), JSON.stringify({ ...old, history_key: key }));
+    const w = createListWatcher({ root });
+    try {
+      const p = w.snapshot({ maxScanAgeMs: 0 });
+      assert.equal(archivedRows(p).length, 0);
+      assert.deepEqual(p.archivedWorkspaces, []);
+      assert.equal(p.workspaces.find(x => x.path === now).name, "one");
+    } finally {
+      w.close();
+    }
+  });
+});
+
+test("History: a stopped session sorts by its close, not its earlier round end, before and after its folder is removed", async () => {
+  const { archiveSession } = await import("../skill-packs/cross-review/scripts/lib/history.js");
+  await withHome(async hist => {
+    const root = mk("finish-order");
+    const ws = path.join(root, "wt");
+    // the round ended at T1, another review finished at T2, the stopped one was closed at T3
+    const t1 = nowS() - 9000;
+    const t2 = nowS() - 6000;
+    const t3 = nowS() - 4000; // over an hour ago: History, not "stopped, resumable"
+    const dir = writeSession(path.join(ws, ".cross-review", "sessions"), "review-impl-20261015-903", {
+      skill: "review-impl", created: t1 - 600, inputs: ["## USER_REQUEST\nAn invented failed review.\n"],
+      state: { working_dir: ws, history_key: newKey(), ended_at: t3, end_outcome: "stopped" },
+      rounds: [{ status: "failed", started: t1 - 30, elapsed: 30 }],
+    });
+    archiveSession(dir, { finalized: false });
+    archiveRecord(hist, { workspace: path.join(root, "other"), id: "review-impl-20261015-904", createdAt: t2 - 60, endedAt: t2 });
+    const w = createListWatcher({ root });
+    try {
+      const order = () => w.snapshot({ maxScanAgeMs: -1 }).history.map(s => s.id);
+      assert.deepEqual(order(), ["review-impl-20261015-903", "review-impl-20261015-904"]);
+      fs.rmSync(ws, { recursive: true, force: true });
+      assert.deepEqual(order(), ["review-impl-20261015-903", "review-impl-20261015-904"]);
+    } finally {
+      w.close();
+    }
+  });
+});
+
+test("archive: a warm watcher drops archived rows when history becomes a file", async () => {
+  await withHome(async hist => {
+    const root = mk("archive-file");
+    archiveRecord(hist, { workspace: path.join(root, "gone") });
+    // whole seconds, so the file below can carry exactly the folder's mtime: a cache hit
+    const stamp = 1_800_000_000;
+    fs.utimesSync(hist, stamp, stamp);
+    const w = createListWatcher({ root });
+    try {
+      assert.equal(archivedRows(w.snapshot({ maxScanAgeMs: -1 })).length, 1);
+      fs.rmSync(hist, { recursive: true });
+      fs.writeFileSync(hist, "not a folder", { mode: 0o700 });
+      fs.utimesSync(hist, stamp, stamp);
+      assert.equal(archivedRows(w.snapshot({ maxScanAgeMs: -1 })).length, 0);
+    } finally {
+      w.close();
+    }
+  });
 });
