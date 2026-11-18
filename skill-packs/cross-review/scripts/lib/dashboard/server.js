@@ -604,10 +604,14 @@ function reviewerCatalog(impl, cacheFile) {
   };
   refresh();
   return {
-    /** The catalog now (waiting only when there is none yet); `settle` also waits for the ask in flight, `refresh` starts one. */
-    async models({ refresh: again = false, settle = false } = {}) {
+    /**
+     * The catalog now (waiting only when there is none yet); `settle` also waits for the ask in
+     * flight, `refresh` starts one, `revalidate` starts one without waiting for it.
+     */
+    async models({ refresh: again = false, settle = false, revalidate = false } = {}) {
       if (again) await refresh();
       else if (!state || settle) await (refreshing || (state ? null : refresh()));
+      else if (revalidate) refresh();
       return { models: null, fetchedAt: null, cli: null, ...state, refreshing: Boolean(refreshing) };
     },
     defaultModel() {
@@ -764,7 +768,8 @@ export async function startDashboard({
     }
     const entries = await Promise.all(REVIEWER_NAMES.map(async name => {
       const mod = getReviewer(name);
-      const m = await catalogs[name].models();
+      // a reviewer CLI upgraded since start offers new models: the page takes them when they come (followCatalog)
+      const m = await catalogs[name].models({ revalidate: true });
       return [name, {
         label: mod.label, models: m.models, modelsFetchedAt: m.fetchedAt, modelsRefreshing: m.refreshing,
         defaultModel: catalogs[name].defaultModel(), cli: m.cli, efforts: mod.efforts || null, allowCustomModel: mod.allowCustomModel === true,

@@ -1062,8 +1062,28 @@ test("models: a cached catalog answers at once while the server asks the reviewe
     assert.deepEqual([m.models, m.cli.version, m.refreshing], [NEW_MODELS, "codex-cli 9.9.9-invented", false]);
     assert.ok(m.fetchedAt > 1000);
     s = await getJson(d, "/api/settings");
-    assert.deepEqual([s.reviewers.codex.models, s.reviewers.codex.modelsRefreshing], [NEW_MODELS, false]);
+    assert.deepEqual(s.reviewers.codex.models, NEW_MODELS);
     assert.deepEqual(JSON.parse(fs.readFileSync(cache, "utf8")).models, NEW_MODELS);
+  } finally {
+    catalog.answer(null);
+    await d.close();
+  }
+});
+
+test("models: each settings load asks the reviewer again (a CLI upgraded since start), showing the list it has meanwhile", async () => {
+  const catalog = slowCatalog();
+  const { d } = await serve({ catalogs: { codex: catalog } });
+  try {
+    catalog.answer(OLD_MODELS); // the ask at start
+    await getJson(d, "/api/models");
+    let s = await getJson(d, "/api/settings");
+    assert.equal(catalog.calls, 2);
+    assert.deepEqual([s.reviewers.codex.models, s.reviewers.codex.modelsRefreshing], [OLD_MODELS, true]);
+    s = await getJson(d, "/api/settings");
+    assert.equal(catalog.calls, 2, "a load while an ask is in flight joins it");
+    catalog.answer(NEW_MODELS);
+    const m = await getJson(d, "/api/models");
+    assert.deepEqual([m.models, m.refreshing], [NEW_MODELS, false]);
   } finally {
     catalog.answer(null);
     await d.close();
