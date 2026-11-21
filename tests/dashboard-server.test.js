@@ -1803,6 +1803,7 @@ test("archive: broken, mistyped, non-final or unknown-version files are skipped,
     archiveRecord(hist, { workspace: path.join(root, "y"), state: "waiting" });
     archiveRecord(hist, { workspace: path.join(root, "z"), v: 2 });
     archiveRecord(hist, { workspace: "relative/ws" });
+    archiveRecord(hist, { workspace: path.join(root, "e"), effort: 5 });
     const w = createListWatcher({ root });
     try {
       assert.deepEqual(archivedRows(w.snapshot({ maxScanAgeMs: 0 })).map(s => s.history_key), [good.history_key]);

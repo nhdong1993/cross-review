@@ -94,12 +94,15 @@ test("buildCommand: flag order, sandboxes, resume by conversation id", () => {
   const base = ["--input-format", "stream-json", "--output-format", "stream-json"];
   assert.deepEqual(
     agy.buildCommand({ threadId: "", workingDir: "/w", model: "gemini-x-flash", effort: "low", sandbox: "danger-full-access" }),
-    { cmd: "agy", args: [...base, "--model", "gemini-x-flash", "--effort", "low", "--dangerously-skip-permissions", "--print="], cwd: "/w" },
+    { cmd: "agy", args: [...base, "--model", "gemini-x-flash", "--effort", "low", "--dangerously-skip-permissions", "--print="], cwd: "/w", effort: "low" },
   );
+  // the effort agy actually gets: none for a variant (it names its level) or a model without levels
+  assert.equal(agy.buildCommand({ threadId: "", workingDir: "/w", model: "gemini-x-flash-low", effort: "high", sandbox: "read-only" }).effort, null);
   assert.deepEqual(
     agy.buildCommand({ threadId: "conv-9", workingDir: "/w", model: "claude-y", effort: "high", sandbox: "read-only" }).args,
     [...base, "--model", "claude-y", "--sandbox", "--mode", "plan", "--conversation", "conv-9", "--print="],
   );
+  assert.equal(agy.buildCommand({ threadId: "conv-9", workingDir: "/w", model: "claude-y", effort: "high", sandbox: "read-only" }).effort, null);
   // no model and no default model file: the effort as requested
   assert.deepEqual(
     agy.buildCommand({ threadId: "", workingDir: "/w", model: null, effort: "medium", sandbox: "danger-full-access" }).args,

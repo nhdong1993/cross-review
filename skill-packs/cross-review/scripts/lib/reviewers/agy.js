@@ -205,11 +205,13 @@ export function buildCommand({ threadId, workingDir, model, effort, sandbox, sys
       args.push("--agent", agentName, "--disable-slash-commands");
     }
   }
-  args.push(...resolveFlags({ model, effort, catalog: readCatalog(), defaultName: defaultModel() }));
+  const flags = resolveFlags({ model, effort, catalog: readCatalog(), defaultName: defaultModel() });
+  args.push(...flags);
   args.push(...(sandbox === fullAccessSandbox ? ["--dangerously-skip-permissions"] : ["--sandbox", "--mode", "plan"]));
   if (threadId) args.push("--conversation", threadId);
   args.push("--print=");
-  return { cmd: "agy", args, cwd: workingDir };
+  // effort: the level agy gets, null for a variant or a model without levels (the runner records it)
+  return { cmd: "agy", args, cwd: workingDir, effort: flags.includes("--effort") ? effort : null };
 }
 
 // ---------- event log ----------

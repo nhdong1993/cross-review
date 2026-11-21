@@ -32,6 +32,8 @@ export function archiveSession(sessionDir, { finalized }) {
     issues: s.issues,
     issueCount: s.issueCount,
     model: s.model,
+    // only an effort the runner recorded at launch: one inferred from the request could be wrong
+    ...(s.effortRecorded ? { effort: s.effort } : {}),
     reviewer: s.reviewer,
     reviewerSeconds: s.reviewerSeconds,
     createdAt: s.createdAt,
@@ -73,7 +75,9 @@ export function validRecord(r) {
   return Boolean(r) && typeof r === "object" && r.v === 1 && str(r.history_key) && UUID.test(r.history_key)
     && str(r.workspace) && path.isAbsolute(r.workspace) && str(r.id) && str(r.skill) && str(r.title)
     && str(r.issues) && str(r.reviewer) && STATES.has(r.state) && num(r.rounds) && num(r.issueCount)
-    && num(r.reviewerSeconds) && numOrNull(r.createdAt) && numOrNull(r.endedAt) && (r.model === null || str(r.model));
+    && num(r.reviewerSeconds) && numOrNull(r.createdAt) && numOrNull(r.endedAt) && (r.model === null || str(r.model))
+    // effort came later: a summary written before it has none
+    && (r.effort === undefined || r.effort === null || str(r.effort));
 }
 
 /** Every valid record under its own name, <history_key>.json; throws when the folder cannot be listed. */

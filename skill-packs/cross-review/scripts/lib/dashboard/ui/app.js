@@ -191,6 +191,25 @@ const modelOf = s => {
   return c && c.defaultModel ? `${modelName(c.defaultModel, c.models)} · ${label} default` : `${label} default`;
 };
 
+// Effort tag colours, low to high; a level not listed here is grey
+const EFFORT_TONE = { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" };
+
+/**
+ * The effort a review ran at. A recorded one (what the runner passed) is shown as is; an older
+ * session's requested one only when its model has effort levels (not agy's variants), per today's list.
+ */
+function effortShown(reviewer, model, effort, recorded) {
+  if (recorded) return effort || null;
+  const c = own(catalogInfo, reviewer) || {};
+  return effort && !hasNoEfforts(c.models, model || c.defaultModel) ? effort : null;
+}
+
+/** The effort as a coloured tag; "" when it does not apply. */
+function effortTag(s) {
+  const e = effortShown(s.reviewer, s.model, s.effort, s.effortRecorded);
+  return e ? `<span class="eff ${own(EFFORT_TONE, e) || "other"}">${esc(e)}</span>` : "";
+}
+
 /** In progress: all issues so far and what the latest finished review left open (new, reopened,
  * still open after a fix, kept after a dispute); "" before the first review. */
 function issuesNow(s) {
@@ -203,12 +222,14 @@ function issuesNow(s) {
 }
 
 function activeRow(s) {
+  const eff = effortTag(s);
+  const effort = effortShown(s.reviewer, s.model, s.effort, s.effortRecorded);
   const where = `${s.wsName} · ${s.skill} · round ${s.round}${s.state === "waiting" ? " returned" : ""} · ${modelOf(s)}`;
   const issues = issuesNow(s);
   // the warning shares the second line with the issues, so every row keeps two lines
   const line2 = [issues && esc(issues), s.warn && `<span class="warn with-i">${ic("warn")}${esc(s.warn)}</span>`].filter(Boolean).join(" · ");
   return `<tr data-go="${esc(sessionHref(s.ws, s.id))}"><td>${st(s.state, s.label)}</td>
-    <td class="clip" title="${esc(`${s.title}\n${where}`)}">${skillIc(s.skill)}${inline(s.title)}<div class="line2">${esc(where)}</div></td>
+    <td class="clip" title="${esc(`${s.title}\n${where}${effort ? ` · effort ${effort}` : ""}`)}">${skillIc(s.skill)}${inline(s.title)}<div class="line2 with-eff"><span class="ell">${esc(where)}</span>${eff}</div></td>
     <td class="soft clip" title="${esc([s.now, issues, s.warn].filter(Boolean).join("\n"))}">${esc(s.now)}${line2 ? `<div class="line2">${line2}</div>` : ""}</td>
     <td class="num mono" data-since="${Number(s.since) || 0}">${clock(nowS() - s.since)}</td></tr>`;
 }
@@ -219,9 +240,11 @@ const SUMMARY_ONLY = "Showing the last saved summary. This dashboard has not fou
 function historyRow(s) {
   const open = s.archived ? `title="${esc(SUMMARY_ONLY)}"` : `data-go="${esc(sessionHref(s.ws, s.id))}"`;
   const model = s.archived ? s.model || `${own(REVIEWERS, s.reviewer) || s.reviewer} default` : modelOf(s);
+  // the effort on a line of its own keeps the Model column narrow
+  const eff = effortTag(s);
   return `<tr data-row ${open}><td>${st(s.state, s.label)}</td>
     <td class="brk">${skillIc(s.skill)}${inline(s.title)}<div class="line2">${esc(`${s.wsName} · ${s.skill}${s.archived ? " · summary only" : ""}`)}</div></td>
-    <td class="num">${s.rounds}</td><td class="soft">${esc(s.issues)}</td><td class="soft nw">${esc(model)}</td>
+    <td class="num">${s.rounds}</td><td class="soft">${esc(s.issues)}</td><td class="soft nw">${esc(model)}${eff ? `<div class="line2 eff-line">${eff}</div>` : ""}</td>
     <td class="num mono nw">${s.reviewerSeconds ? clock(s.reviewerSeconds) : "—"}</td><td class="num line2 nw">${esc(when(s.endedAt || s.since || s.createdAt))}</td></tr>`;
 }
 
@@ -798,9 +821,8 @@ function renderFacts(d) {
   const fallback = c.defaultModel ? `${modelName(c.defaultModel, c.models)} · ${reviewer} default` : `${reviewer} default`;
   $("#f-model").textContent = f.model ? modelName(f.model, c.models) : fallback;
   const src = f.sources && f.sources.effort ? String(f.sources.effort).split(":").join(", ") : null;
-  // a model with no effort levels (agy) ran without one, whatever the session stored
-  const levels = !hasNoEfforts(c.models, f.model || c.defaultModel);
-  $("#f-effort").textContent = f.effort && levels ? `${f.effort}${src ? ` · ${src}` : ""}` : "—";
+  const effort = effortShown(f.reviewer, f.model, f.effort, f.effortRecorded);
+  $("#f-effort").textContent = effort ? `${effort}${src ? ` · ${src}` : ""}` : "—";
   $("#f-caller").textContent = (f.caller && f.caller.title) || "Agent";
   $("#f-time").textContent = clock(f.reviewerSeconds || 0) + (f.runningSince ? " + running" : "");
   $("#f-started").textContent = started(f.startedAt);

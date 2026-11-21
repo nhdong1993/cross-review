@@ -587,6 +587,11 @@ function reviewMessage(r, peer) {
  * Everything about a session that depends on the clock or on live processes.
  * Returns { summary, detail }.
  */
+/** The effort the reviewer got: what the runner recorded at launch, else (older sessions) the one asked for. */
+const effortUsed = state => (Object.hasOwn(state, "effort_applied") ? state.effort_applied : state.effort || null);
+// recorded: the effort above is what the runner passed, so the page shows it as is (null: none)
+const effortRecorded = state => Object.hasOwn(state, "effort_applied");
+
 export function classify(parsed, { now = Math.floor(Date.now() / 1000), isAlive = () => false } = {}) {
   const { state, peer } = parsed;
   const rounds = effectiveRounds(parsed, { isAlive });
@@ -638,6 +643,8 @@ export function classify(parsed, { now = Math.floor(Date.now() / 1000), isAlive 
     // count stays for a page loaded before this text existed (an update before a restart)
     newIssues: lastReview ? { round: lastReview.round, count: Object.values(lastReview.did).filter(d => d === "raised").length, text: openKinds(lastReview.did) } : null,
     model: state.model || null,
+    effort: effortUsed(state),
+    effortRecorded: effortRecorded(state),
     reviewer: state.reviewer || "codex",
     caller: state.caller && state.caller.name ? { name: String(state.caller.name), title: state.caller.title ? String(state.caller.title) : null } : null,
     reviewerSeconds,
@@ -683,7 +690,8 @@ export function classify(parsed, { now = Math.floor(Date.now() / 1000), isAlive 
     facts: {
       reviewer: state.reviewer || "codex",
       model: state.model || null,
-      effort: state.effort || null,
+      effort: effortUsed(state),
+      effortRecorded: effortRecorded(state),
       sources: state.settings_sources || null,
       caller: state.caller || null,
       reviewerSeconds,

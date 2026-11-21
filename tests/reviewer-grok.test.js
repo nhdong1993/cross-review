@@ -59,7 +59,7 @@ test("buildCommand: fixed flags first, then the variable values, the system prom
   const full = ["--sandbox", "off", "--always-approve"];
   assert.deepEqual(
     grok.buildCommand({ threadId: "", workingDir: "/w", model: null, effort: "high", sandbox: "danger-full-access", promptFile: "/s/prompt.txt" }),
-    { cmd: "grok", args: [...fixed, ...full, "--prompt-file", "/s/prompt.txt", "--effort", "high"], cwd: "/w" },
+    { cmd: "grok", args: [...fixed, ...full, "--prompt-file", "/s/prompt.txt", "--effort", "high"], cwd: "/w", effort: undefined },
   );
   assert.deepEqual(
     onPlatform("darwin", () => grok.buildCommand({ threadId: "", workingDir: "/w", model: "grok-x", effort: "low", sandbox: "read-only", promptFile: "/s/prompt.txt" }).args),
@@ -196,6 +196,13 @@ test("listModels: the ids `grok models` prints, with the effort levels Grok cach
   const models = await grok.listModels();
   assert.deepEqual(models.map(m => [m.slug, m.efforts]), [["grok-x-large", ["low", "high"]], ["grok-x-small", null], ["grok-x-solo", []], ["local model", null]]);
   assert.ok(!JSON.stringify(models).includes("never-read"));
+  // what effort a turn used is Grok's call (its cache is advisory): unknown for any model
+  const argAfter = (args, flag) => (args.includes(flag) ? args[args.indexOf(flag) + 1] : undefined);
+  const turn = model => grok.buildCommand({ threadId: "", workingDir: "/w", model, effort: "high", sandbox: "danger-full-access", promptFile: "/p" });
+  for (const model of ["grok-x-solo", "grok-x-large", null]) {
+    assert.ok(Object.hasOwn(turn(model), "effort") && turn(model).effort === undefined, String(model));
+    assert.equal(argAfter(turn(model).args, "--effort"), "high");
+  }
   fs.writeFileSync(cache, "{ broken");
   assert.deepEqual((await grok.listModels()).map(m => m.efforts), [null, null, null, null]);
   fs.rmSync(cache);

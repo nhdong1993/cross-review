@@ -64,7 +64,9 @@ export function buildCommand({ threadId, workingDir, model, effort, sandbox, sys
       throw new Error(`Grok Build cannot take this system prompt on Windows: the command line would be about ${length} characters, over the limit of 32,767`);
     }
   }
-  return { cmd: "grok", args, cwd: workingDir };
+  // effort undefined: Grok decides per model (its cache is advisory and the default model is not
+  // named), so what it used is unknown; the runner records nothing and the page falls back
+  return { cmd: "grok", args, cwd: workingDir, effort: undefined };
 }
 
 /** Grok's tool names. A shell result is JSON carrying `exit_code`; a failed command is not an `is_error`. */

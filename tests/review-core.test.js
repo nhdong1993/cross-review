@@ -646,11 +646,12 @@ const archiveOf = dir => {
   const key = JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8")).history_key;
   return { key, file: path.join(historyDir(), `${key}.json`) };
 };
-const ARCHIVE_FIELDS = ["createdAt", "endedAt", "history_key", "id", "issueCount", "issues", "model", "reviewer", "reviewerSeconds", "rounds", "skill", "state", "title", "v", "workspace"];
+const ARCHIVE_FIELDS = ["createdAt", "effort", "endedAt", "history_key", "id", "issueCount", "issues", "model", "reviewer", "reviewerSeconds", "rounds", "skill", "state", "title", "v", "workspace"];
 
 test("end archives one allow-listed summary per session under ~/.cross-review/history", async () => {
   setCodexOutput("### VERDICT\n- Status: APPROVE\n- Reason: ok\n");
-  const begun = await beginSession({ skill: "review-plan", inputText: inputFor("review-plan", "ha"), workingDir: workDir });
+  // a non-default effort, so an archive that falls back to the default cannot pass
+  const begun = await beginSession({ skill: "review-plan", inputText: inputFor("review-plan", "ha"), workingDir: workDir, effort: "low" });
   await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
   const ended = await endSession(begun.session_dir);
   assert.equal(ended.archive_warning, undefined);
@@ -662,6 +663,9 @@ test("end archives one allow-listed summary per session under ~/.cross-review/hi
   assert.equal(rec.id, path.basename(begun.session_dir));
   assert.equal(rec.state, "approve");
   assert.equal(rec.rounds, 1);
+  assert.equal(rec.effort, "low");
+  // the runner records the effort it passed to the reviewer, which the dashboard shows
+  assert.equal(JSON.parse(fs.readFileSync(path.join(begun.session_dir, "state.json"), "utf8")).effort_applied, "low");
   assert.equal(rec.workspace, fs.realpathSync(workDir));
   assert.equal(typeof rec.endedAt, "number");
   if (process.platform !== "win32") {
@@ -1338,6 +1342,26 @@ function agyCalls() {
   return fs.readFileSync(f, "utf8").trim().split("\n").filter(Boolean).map(l => JSON.parse(l));
 }
 
+test("agy: a resume on a variant passes no effort, and the runner and archive record none", async () => {
+  fs.rmSync(process.env.FAKE_AGY_LOG, { force: true });
+  fs.writeFileSync(process.env.FAKE_AGY_OUTPUT, "### ISSUE-1: Something\n- Category: correctness\n- Severity: high\n- Problem: p\n\n### VERDICT\n- Status: REVISE\n- Reason: r\n");
+  const begun = await beginSession({ skill: "review-impl", mode: "working-tree", inputText: inputFor("review-impl", "v1"), workingDir: workDir, reviewer: "agy", model: "gemini-x-flash", effort: "low" });
+  await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
+  assert.equal(stateOf(begun.session_dir).effort_applied, "low");
+  fs.writeFileSync(process.env.FAKE_AGY_OUTPUT, "### VERDICT\n- Status: APPROVE\n- Reason: ok\n");
+  await replySession(begun.session_dir, { inputText: inputFor("review-impl", "v2"), model: "gemini-x-flash-low", effort: "high" });
+  await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
+  const last = agyCalls().at(-1);
+  assert.equal(argAfter(last.args, "--model"), "gemini-x-flash-low");
+  assert.ok(!last.args.includes("--effort"));
+  const st = stateOf(begun.session_dir);
+  assert.deepEqual([st.effort, st.effort_applied], ["high", null]);
+  await endSession(begun.session_dir);
+  const rec = JSON.parse(fs.readFileSync(path.join(process.env.HOME, ".cross-review", "history", `${st.history_key}.json`), "utf8"));
+  assert.ok(Object.hasOwn(rec, "effort"));
+  assert.equal(rec.effort, null);
+});
+
 test("agy reviewer round trip: NDJSON on stdin, resumed by --conversation", async () => {
   fs.rmSync(process.env.FAKE_AGY_LOG, { force: true });
   resetLog();
@@ -1374,6 +1398,7 @@ test("agy reviewer round trip: NDJSON on stdin, resumed by --conversation", asyn
   assert.ok(calls.every(c => argAfter(c.args, "--agent") === "cross-reviewer-review-impl" && c.args.includes("--disable-slash-commands")));
   assert.ok(calls.every(c => c.args.includes("--dangerously-skip-permissions") && c.reviewerEnv === "agy"));
   assert.equal(codexCalls().length, 0, "Codex is not started for an agy review");
+  assert.equal(stateOf(begun.session_dir).effort_applied, "low");
   const end = await endSession(begun.session_dir);
   assert.equal(end.finalized, true);
 });
@@ -1443,12 +1468,20 @@ test("grok reviewer round trip: prompt by --prompt-file, resumed by --resume, an
   assert.equal(w1.review.blocks.length, 1);
   const st = stateOf(begun.session_dir);
   assert.deepEqual([st.reviewer, st.sandbox, st.model, st.effort], ["grok", "danger-full-access", "grok-unlisted", "xhigh"]);
+  // Grok decides the effort per model: the runner records none, so the dashboard falls back
+  assert.ok(!Object.hasOwn(st, "effort_applied"));
 
   fs.writeFileSync(process.env.FAKE_GROK_OUTPUT, "### VERDICT\n- Status: APPROVE\n- Reason: ok\n");
   const input2 = inputFor("review-impl", "g2");
+  // a value left by an earlier launch must not survive a Grok resume, nor turn into null
+  const stateFile = path.join(begun.session_dir, "state.json");
+  fs.writeFileSync(stateFile, JSON.stringify({ ...stateOf(begun.session_dir), effort_applied: "low" }));
   await replySession(begun.session_dir, { inputText: input2 });
   const w2 = await waitSession(begun.session_dir, { maxWaitSeconds: 30 });
   assert.equal(w2.next, "done");
+  const resumed = stateOf(begun.session_dir);
+  assert.equal(resumed.effort, "xhigh");
+  assert.ok(!Object.hasOwn(resumed, "effort_applied"));
 
   const calls = grokCalls();
   assert.equal(calls.length, 2);
@@ -1467,6 +1500,8 @@ test("grok reviewer round trip: prompt by --prompt-file, resumed by --resume, an
   assert.equal(codexCalls().length, 0, "Codex is not started for a Grok review");
   const end = await endSession(begun.session_dir);
   assert.equal(end.finalized, true);
+  const rec = JSON.parse(fs.readFileSync(path.join(process.env.HOME, ".cross-review", "history", `${resumed.history_key}.json`), "utf8"));
+  assert.ok(!Object.hasOwn(rec, "effort"), "an unknown effort is not archived");
 });
 
 test("a failed Grok turn (is_error with errors) stops the round with Grok's message", async () => {

@@ -389,7 +389,7 @@ export function createListWatcher({ root, now = () => Math.floor(Date.now() / 10
       if (liveKeys.has(r.history_key)) continue;
       const ws = wsKey(r.workspace);
       if (!wsMap.has(ws)) goneWs.set(ws, r.workspace);
-      history.push({ ...r, ws, group: "history", since: r.endedAt || r.createdAt, label: LABELS[r.state], archived: true, searchText: r.title.toLowerCase() });
+      history.push({ ...r, ws, group: "history", since: r.endedAt || r.createdAt, label: LABELS[r.state], archived: true, effortRecorded: Object.hasOwn(r, "effort"), searchText: r.title.toLowerCase() });
     }
     const absOf = new Map([...wsMap, ...goneWs]);
     const names = new Map();

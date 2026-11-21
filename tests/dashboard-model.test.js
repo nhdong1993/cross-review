@@ -155,6 +155,8 @@ test("the running story ends with checking now and Round 3 in progress", () => {
   assert.equal(detail.thread.at(-1).kind, "running");
   assert.ok(summary.now && summary.now.length > 0);
   assert.equal(detail.facts.caller.title, "Claude Code");
+  // the list shows the effort the review runs at, after its model
+  assert.equal(summary.effort, "xhigh");
   // In progress shows what the latest finished review raised, while round 3 runs
   assert.deepEqual(summary.newIssues, { round: 2, count: 1, text: "1 new" });
   assert.equal(summary.issueCount, 3);
@@ -498,7 +500,7 @@ test("each session's inputs split on the placeholders of its own prompts directo
 // ---------- the ended-session reader of the History archive ----------
 
 test("readSession logs:false reads no event log or line times and gives the same archive fields", () => {
-  const ARCHIVED = ["id", "skill", "title", "state", "rounds", "issues", "issueCount", "model", "reviewer", "reviewerSeconds", "createdAt"];
+  const ARCHIVED = ["id", "skill", "title", "state", "rounds", "issues", "issueCount", "model", "effort", "reviewer", "reviewerSeconds", "createdAt"];
   const pick = s => Object.fromEntries(ARCHIVED.map(k => [k, s[k]]));
   const isLog = f => /output(-round-\d+)?\.jsonl$|times-round-\d+\.jsonl$/.test(String(f));
   const count = fn => {
@@ -520,6 +522,22 @@ test("readSession logs:false reads no event log or line times and gives the same
       fs.readFileSync = realRead;
     }
   };
+  // an ended session at a non-default effort, so a reader that falls back to the default fails
+  const lowDir = writeSession(path.join(tmp, "low-effort", ".cross-review", "sessions"), "review-impl-20261010-201", {
+    skill: "review-impl", mode: "working-tree", created: fx.now - 900, meta: "APPROVE", inputs: ["## USER_REQUEST\nInvented.\n"],
+    state: { effort: "low", ended_at: fx.now - 100 },
+    rounds: [{ status: "completed", started: fx.now - 800, elapsed: 30, review: "### VERDICT\n- Status: APPROVE\n- Reason: Invented.\n", acts: [] }],
+  });
+  assert.equal(classify(readSession(lowDir, { logs: false }), { now: fx.now, isAlive }).summary.effort, "low");
+  // the effort the runner passed wins over the one asked for; null when none was passed (an agy variant)
+  const appliedDir = writeSession(path.join(tmp, "low-effort", ".cross-review", "sessions"), "review-impl-20261010-202", {
+    skill: "review-impl", mode: "working-tree", reviewer: "agy", created: fx.now - 900, meta: "APPROVE", inputs: ["## USER_REQUEST\nInvented.\n"],
+    state: { model: "gemini-x-flash-low", effort: "high", effort_applied: null, ended_at: fx.now - 100 },
+    rounds: [{ status: "completed", started: fx.now - 800, elapsed: 30, review: "### VERDICT\n- Status: APPROVE\n- Reason: Invented.\n", acts: [] }],
+  });
+  const applied = classify(readSession(appliedDir, { logs: false }), { now: fx.now, isAlive });
+  assert.equal(applied.summary.effort, null);
+  assert.equal(applied.detail.facts.effort, null);
   for (const key of ["approved", "stalemate", "think", "endedOpen", "stoppedOld"]) {
     const dir = fx.sessions[key];
     const full = count(() => readSession(dir));

@@ -79,7 +79,7 @@ function launchReviewer(
   const jsonlFile = path.join(stateDir, "output.jsonl");
   const errFile = path.join(stateDir, "error.log");
 
-  const { cmd, args, cwd } = reviewer.buildCommand({
+  const built = reviewer.buildCommand({
     threadId,
     workingDir,
     model,
@@ -89,6 +89,7 @@ function launchReviewer(
     skillName,
     promptFile, // for a CLI that takes a file, not stdin (Grok)
   });
+  const { cmd, args, cwd } = built;
 
   // A reviewer that reads its prompt in its own format gets that on stdin; prompt.txt stays the text
   let stdinFile = promptFile;
@@ -130,7 +131,9 @@ function launchReviewer(
   fs.closeSync(fout);
   fs.closeSync(ferr);
 
-  return { pid, pgid: pid };
+  // the effort the reviewer actually got: an adapter that may drop it says so (agy: the level or
+  // null), or returns undefined when it cannot tell (Grok); no field: the effort as passed
+  return { pid, pgid: pid, appliedEffort: "effort" in built ? built.effort : effort };
 }
 
 function isAlive(pid) {
@@ -1115,7 +1118,7 @@ function cmdStart(argv) {
 
   try {
     const systemPromptFile = resolveSystemPromptFile(skillName, state.skills_dir);
-    const { pid: reviewerPid, pgid } = launchReviewer(
+    const { pid: reviewerPid, pgid, appliedEffort } = launchReviewer(
       reviewer, resolvedSessionDir, resolvedWorkingDir, "", effort, values.model, sandbox,
       { systemPromptFile, skillName },
     );
@@ -1131,6 +1134,8 @@ function cmdStart(argv) {
       pgid: reviewerPgid,
       watchdog_pid: watchdogPid,
       effort,
+      // undefined (unknown) drops the key, so an earlier launch's value does not stay behind
+      effort_applied: appliedEffort,
       model: values.model || null,
       sandbox,
       timeout,
@@ -1349,7 +1354,7 @@ function cmdResume(argv) {
   try {
     const skillName = prevState.skill_name || "";
     const systemPromptFile = resolveSystemPromptFile(skillName, prevState.skills_dir);
-    const { pid: reviewerPid, pgid } = launchReviewer(
+    const { pid: reviewerPid, pgid, appliedEffort } = launchReviewer(
       reviewer, resolvedSessionDir, resolvedWorkingDir, threadId, effort, values.model,
       prevState.sandbox || reviewer.defaultSandbox,
       { systemPromptFile, skillName },
@@ -1366,6 +1371,8 @@ function cmdResume(argv) {
       pgid: reviewerPgid,
       watchdog_pid: watchdogPid,
       effort,
+      // undefined (unknown) drops the key, so an earlier launch's value does not stay behind
+      effort_applied: appliedEffort,
       timeout,
       started_at: now,
       thread_id: threadId,

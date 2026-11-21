@@ -143,6 +143,16 @@ try {
   for (const row of dom.active) assert.ok(row.where.split(" · ").length >= 4, row.where);
   const runningRow = dom.active.find(r => r.go.endsWith(`/${path.basename(fx.sessions.running)}`));
   assert.equal(runningRow.now2, "3 issues · 1 new in round 2");
+  // the effort the review runs at, as a coloured tag after the model
+  assert.equal(await page.evaluate(`document.querySelector('#active tr[data-go$="/${path.basename(fx.sessions.running)}"] .line2 .eff')?.outerHTML`), '<span class="eff xhigh">xhigh</span>');
+  // a line too long for the cell shortens its text and keeps the tag in view; the tooltip names it
+  const longLine = await page.evaluate(`(() => {
+    const row = document.querySelector('#active tr[data-go$="/${path.basename(fx.sessions.running)}"]');
+    row.querySelector(".with-eff .ell").textContent = "an-invented-workspace-with-a-very-long-name · review-impl · round 3 · An Invented Model With A Long Name · Codex default".repeat(2);
+    const cell = row.cells[1].getBoundingClientRect(), tag = row.querySelector(".with-eff .eff").getBoundingClientRect();
+    return { inside: tag.width > 0 && tag.right <= cell.right + 0.5, title: row.cells[1].title.endsWith(" · effort xhigh") };
+  })()`);
+  assert.deepEqual(longLine, { inside: true, title: true });
   assert.ok(dom.active.filter(r => r.warn).every(r => r.now2.includes(" new in round ")), JSON.stringify(dom.active));
 
   // History: the newest finished sessions, a page that fits the window; filters work in the page
@@ -594,8 +604,12 @@ try {
     await rvPage.goto(`${dR.url}#/`);
     await rvPage.waitFor(`document.querySelectorAll("#history tr[data-go]").length === 4`);
     await rvPage.waitFor(`/Fam X \\(High\\) · Antigravity default/.test(document.getElementById("history").textContent)`);
-    const models = await rvPage.evaluate(`[...document.querySelectorAll("#history tr[data-go]")].map(tr => tr.children[4].textContent)`);
+    const models = await rvPage.evaluate(`[...document.querySelectorAll("#history tr[data-go]")].map(tr => tr.children[4].firstChild.textContent)`);
     assert.deepEqual(models, ["g-unknown", "Fam X (High) · Antigravity default", "solo-y", "Claude Code default"]);
+    // the effort tag sits on the Model cell's second line, except where the model has no levels
+    // (solo-y); agy's default model runs with --effort, so its stored level is the one used
+    const tones = await rvPage.evaluate(`[...document.querySelectorAll("#history tr[data-go]")].map(tr => tr.children[4].querySelector(".line2 > .eff")?.className || null)`);
+    assert.deepEqual(tones, ["eff xhigh", "eff low", null, "eff max"]);
     const facts = async id => {
       await rvPage.evaluate(`location.hash = "#/s/lantern/${id}"`);
       await rvPage.waitFor(`document.querySelector("#thread .mark.rv img") && document.getElementById("f-reviewer").textContent !== ""`);
@@ -761,12 +775,39 @@ try {
     inputs: ["## USER_REQUEST\nInvented request.\n", "## FIXED_ITEMS\nISSUE-1: Invented — fixed in src/a.js:1\n\n## DISPUTED_ITEMS\nISSUE-2: Invented — not a defect\n"],
     rounds: [{ status: "completed", started: openNow - 500, elapsed: 30, review: revise([1, 2]) }, { status: "completed", started: openNow - 300, elapsed: 30, review: revise([1, 2]) }],
   });
+  // an agy review whose launch recorded the effort it passed: shown as recorded, even on a model
+  // today's list says has no levels (and the same model without a record shows none)
+  for (const [id, state] of [["review-impl-20261015-610", { effort: "low", effort_applied: "low" }], ["review-impl-20261015-611", { effort: "low" }]]) {
+    writeSession(path.join(openRoot, "lamp", ".cross-review", "sessions"), id, {
+      skill: "review-impl", mode: "working-tree", reviewer: "agy", created: openNow - 9000, meta: "APPROVE", inputs: ["## USER_REQUEST\nInvented agy review.\n"],
+      state: { model: "solo-y", ended_at: openNow - 8800, end_outcome: "finalized", ...state },
+      rounds: [{ status: "completed", started: openNow - 8900, elapsed: 30, review: "### VERDICT\n- Status: APPROVE\n- Reason: Invented.\n" }],
+    });
+  }
+  // summary-only rows (a removed worktree) on the same no-level model: a recorded "low" keeps its
+  // tag on line two; a recorded null and a summary without the key have none
+  const openHist = path.join(process.env.HOME, ".cross-review", "history");
+  fs.mkdirSync(openHist, { recursive: true });
+  for (const [n, extra] of [[1, { effort: "low" }], [2, { effort: null }], [3, {}]]) {
+    const key = `00000000-0000-4000-8000-${String(700 + n).padStart(12, "0")}`;
+    fs.writeFileSync(path.join(openHist, `${key}.json`), JSON.stringify({
+      v: 1, history_key: key, id: `review-impl-20261015-${700 + n}`, skill: "review-impl", workspace: path.join(openRoot, "gone-lamp"),
+      title: `Invented archived agy review ${n}.`, state: "approve", rounds: 1, issues: "No issues", issueCount: 0,
+      model: "solo-y", reviewer: "agy", reviewerSeconds: 1, createdAt: openNow - 7000 - n, endedAt: openNow - 6900 - n, ...extra,
+    }));
+  }
   const d5 = await startDashboard({ root: openRoot, port: 0, open: false, discoveryFile: null, catalogs });
   const openPage = await browser.newPage(1400, 900);
   try {
     await openPage.goto(`${d5.url}#/`);
     await openPage.waitFor(`document.querySelectorAll("#active tr[data-go]").length === 1`);
     assert.equal(await openPage.evaluate(`document.querySelector("#active tr[data-go]").cells[2].querySelector(".line2").textContent`), "2 issues · 1 still open, 1 maintained in round 2");
+    // once agy's list is in, the unrecorded row loses its tag; the recorded one keeps it
+    await openPage.waitFor(`!document.querySelector('#history tr[data-go$="/review-impl-20261015-611"] .eff')`);
+    const agyTags = await openPage.evaluate(`Object.fromEntries([...document.querySelectorAll("#history tr[data-go]")].map(tr => [tr.dataset.go.split("/").pop(), tr.children[4].querySelector(".eff")?.textContent || null]))`);
+    assert.deepEqual(agyTags, { "review-impl-20261015-610": "low", "review-impl-20261015-611": null });
+    const archivedTags = await openPage.evaluate(`[...document.querySelectorAll("#history tr[data-row]:not([data-go])")].map(tr => [tr.children[1].textContent.match(/archived agy review (\\d)/)?.[1], tr.children[4].querySelector(".line2 > .eff")?.textContent || null]).sort()`);
+    assert.deepEqual(archivedTags, [["1", "low"], ["2", null], ["3", null]]);
   } finally {
     await d5.close();
   }
@@ -916,11 +957,13 @@ async function lateCatalogChecks(browser) {
   try {
     await page.goto(`${d12.url}#/`);
     await page.waitFor(`document.querySelectorAll("#active tr[data-go]").length > 0`);
-    const before = await page.evaluate(`document.querySelector("#active tr[data-go] .line2").textContent`);
+    // the model's words only, without the effort tag after them
+    const noTag = el => `(e => { const c = e.cloneNode(true); c.querySelectorAll(".eff").forEach(t => t.remove()); return c.textContent.trimEnd(); })(${el})`;
+    const before = await page.evaluate(noTag(`document.querySelector("#active tr[data-go] .line2")`));
     assert.match(before, / · Codex default$/);
     release();
     await page.waitFor(`document.getElementById("history").textContent.includes("Model A · Codex default")`);
-    const active = await page.evaluate(`[...document.querySelectorAll("#active tr[data-go]")].map(tr => tr.cells[1].querySelector(".line2").textContent)`);
+    const active = await page.evaluate(`[...document.querySelectorAll("#active tr[data-go]")].map(tr => ${noTag(`tr.cells[1].querySelector(".line2")`)})`);
     assert.ok(active.every(s => s.endsWith(" · Model A · Codex default")), JSON.stringify(active));
   } finally {
     await d12.close();
