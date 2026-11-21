@@ -775,6 +775,12 @@ try {
     inputs: ["## USER_REQUEST\nInvented request.\n", "## FIXED_ITEMS\nISSUE-1: Invented — fixed in src/a.js:1\n\n## DISPUTED_ITEMS\nISSUE-2: Invented — not a defect\n"],
     rounds: [{ status: "completed", started: openNow - 500, elapsed: 30, review: revise([1, 2]) }, { status: "completed", started: openNow - 300, elapsed: 30, review: revise([1, 2]) }],
   });
+  // ultra has a colour of its own (plum), not the grey of an unlisted level
+  writeSession(path.join(openRoot, "ledger", ".cross-review", "sessions"), "review-impl-20261015-620", {
+    skill: "review-impl", mode: "working-tree", created: openNow - 9500, meta: "APPROVE", inputs: ["## USER_REQUEST\nInvented ultra review.\n"],
+    state: { effort: "ultra", effort_applied: "ultra", ended_at: openNow - 9400, end_outcome: "finalized" },
+    rounds: [{ status: "completed", started: openNow - 9450, elapsed: 30, review: "### VERDICT\n- Status: APPROVE\n- Reason: Invented.\n" }],
+  });
   // an agy review whose launch recorded the effort it passed: shown as recorded, even on a model
   // today's list says has no levels (and the same model without a record shows none)
   for (const [id, state] of [["review-impl-20261015-610", { effort: "low", effort_applied: "low" }], ["review-impl-20261015-611", { effort: "low" }]]) {
@@ -805,7 +811,9 @@ try {
     // once agy's list is in, the unrecorded row loses its tag; the recorded one keeps it
     await openPage.waitFor(`!document.querySelector('#history tr[data-go$="/review-impl-20261015-611"] .eff')`);
     const agyTags = await openPage.evaluate(`Object.fromEntries([...document.querySelectorAll("#history tr[data-go]")].map(tr => [tr.dataset.go.split("/").pop(), tr.children[4].querySelector(".eff")?.textContent || null]))`);
-    assert.deepEqual(agyTags, { "review-impl-20261015-610": "low", "review-impl-20261015-611": null });
+    assert.deepEqual(agyTags, { "review-impl-20261015-610": "low", "review-impl-20261015-611": null, "review-impl-20261015-620": "ultra" });
+    const ultra = await openPage.evaluate(`(() => { const t = document.querySelector('#history tr[data-go$="/review-impl-20261015-620"] .eff'); return { cls: t.className, plum: getComputedStyle(t).color === getComputedStyle(document.documentElement).getPropertyValue("--plum").trim().replace(/^#(..)(..)(..)$/, (_, r, g, b) => \`rgb(\${parseInt(r, 16)}, \${parseInt(g, 16)}, \${parseInt(b, 16)})\`) }; })()`);
+    assert.deepEqual(ultra, { cls: "eff ultra", plum: true });
     const archivedTags = await openPage.evaluate(`[...document.querySelectorAll("#history tr[data-row]:not([data-go])")].map(tr => [tr.children[1].textContent.match(/archived agy review (\\d)/)?.[1], tr.children[4].querySelector(".line2 > .eff")?.textContent || null]).sort()`);
     assert.deepEqual(archivedTags, [["1", "low"], ["2", null], ["3", null]]);
   } finally {

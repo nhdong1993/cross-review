@@ -192,7 +192,7 @@ const modelOf = s => {
 };
 
 // Effort tag colours, low to high; a level not listed here is grey
-const EFFORT_TONE = { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" };
+const EFFORT_TONE = { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max", ultra: "ultra" };
 
 /**
  * The effort a review ran at. A recorded one (what the runner passed) is shown as is; an older

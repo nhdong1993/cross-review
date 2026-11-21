@@ -121,10 +121,11 @@ aside section + section { margin-top: 28px; }
 .finding .t { font-weight: 600; }
 .sev { font-weight: 500; font-size: 12px; margin-left: 6px; }
 .sev.high { color: var(--red); } .sev.medium { color: var(--amber); } .sev.low { color: var(--muted); }
-/* effort tag after the model: grey, blue, amber, rust, red from low to max */
+/* effort tag after the model: grey, blue, amber, rust, red from low to max; ultra plum, to stand out */
 .eff { display: inline-block; margin-left: 6px; padding: 0 5px; border: 1px solid currentColor; border-radius: 3px; font-size: 11px; line-height: 15px; font-weight: 500; vertical-align: 1px; white-space: nowrap; }
 .eff.low, .eff.other { color: var(--muted); } .eff.medium { color: var(--blue); } .eff.high { color: var(--amber); }
 .eff.xhigh { color: var(--rust); } .eff.max { color: var(--red); }
+.eff.ultra { color: var(--plum); }
 .eff-line .eff { margin-left: 0; }
 /* a long In progress line shortens before the tag, never hides it */
 td.clip > .with-eff { display: flex; align-items: baseline; }
