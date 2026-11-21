@@ -156,18 +156,125 @@ test("the running story ends with checking now and Round 3 in progress", () => {
   assert.ok(summary.now && summary.now.length > 0);
   assert.equal(detail.facts.caller.title, "Claude Code");
   // In progress shows what the latest finished review raised, while round 3 runs
-  assert.deepEqual(summary.newIssues, { round: 2, count: 1 });
+  assert.deepEqual(summary.newIssues, { round: 2, count: 1, text: "1 new" });
   assert.equal(summary.issueCount, 3);
 });
 
-test("newIssues: the latest review's raised count, null before any review and for peer skills", () => {
-  assert.deepEqual(at("waiting").summary.newIssues, { round: 2, count: 1 });
+test("newIssues: what the latest review left open, null before any review and for peer skills", () => {
+  assert.deepEqual(at("waiting").summary.newIssues, { round: 2, count: 1, text: "1 new" });
   assert.equal(at("think").summary.newIssues, null);
   const dir = writeSession(path.join(tmp, "extra", ".cross-review", "sessions"), "review-impl-20261010-003", {
     skill: "review-impl", mode: "working-tree", created: fx.now, inputs: ["## USER_REQUEST\nInvented.\n"],
     rounds: [{ status: "running", started: fx.now - 30, elapsed: 0, acts: [] }],
   });
   assert.equal(classify(readSession(dir), { now: fx.now, isAlive: () => true }).summary.newIssues, null);
+});
+
+// ---------- issues not closed by a round: still open, maintained, reopened ----------
+
+const issueBlock = (id, title) => `### ISSUE-${id}: ${title}\n- Category: bug\n- Severity: medium\n- Problem: Invented.\n`;
+const revise = ids => ids.map(id => issueBlock(id, `Invented defect ${id}`)).join("\n") + "\n### VERDICT\n- Status: REVISE\n- Reason: Invented.\n";
+const replyIn = (fixed, disputed = []) => `## FIXED_ITEMS\n${fixed.map(id => `ISSUE-${id}: Invented — fixed in src/a.js:1`).join("\n") || "None"}\n\n## DISPUTED_ITEMS\n${disputed.map(id => `ISSUE-${id}: Invented — not a defect`).join("\n") || "None"}\n`;
+function storySession(id, reviews, replies) {
+  return writeSession(path.join(tmp, "open-kinds", ".cross-review", "sessions"), id, {
+    skill: "review-impl", mode: "working-tree", created: fx.now - 3000,
+    inputs: ["## USER_REQUEST\nInvented request.\n", ...replies],
+    rounds: reviews.map((ids, i) => ({ status: "completed", started: fx.now - 2000 + i * 100, elapsed: 30, review: revise(ids) })),
+  });
+}
+
+test("a round that keeps a fixed or disputed issue counts it as still open or maintained, not as nothing new", () => {
+  const dir = storySession("review-impl-20261010-101", [[1, 2], [1, 2]], [replyIn([1], [2])]);
+  const { summary, detail } = classify(readSession(dir), { now: fx.now, isAlive });
+  assert.deepEqual(summary.newIssues, { round: 2, count: 0, text: "1 still open, 1 maintained" });
+  assert.deepEqual(detail.ledger.map(i => i.trail.at(-1)), ["still open", "maintained"]);
+  assert.equal(detail.steps.find(x => x.strong === "Round 2").text, "1 still open, 1 maintained");
+});
+
+test("an issue raised again after it was closed is reopened, not new", () => {
+  const dir = storySession("review-impl-20261010-102", [[1], [2], [1]], [replyIn([1]), replyIn([2])]);
+  const { summary, detail } = classify(readSession(dir), { now: fx.now, isAlive });
+  assert.deepEqual(detail.ledger.find(i => i.id === 1).trail, ["raised", "fixed", "verified", "reopened"]);
+  assert.deepEqual(summary.newIssues, { round: 3, count: 0, text: "1 reopened" });
+  assert.equal(detail.steps.find(x => x.strong === "Round 3").text, "1 reopened");
+  assert.equal(summary.issues, "2: 1 fixed, 1 open");
+});
+
+const approveRecap = ids => ids.map(id => issueBlock(id, `Invented defect ${id}`)).join("\n") + "\n### VERDICT\n- Status: APPROVE\n- Reason: Invented.\n";
+function storyOf(id, rounds, replies) {
+  return writeSession(path.join(tmp, "open-kinds", ".cross-review", "sessions"), id, {
+    skill: "review-impl", mode: "working-tree", created: fx.now - 3000,
+    inputs: ["## USER_REQUEST\nInvented request.\n", ...replies],
+    rounds: rounds.map((review, i) => ({ status: "completed", started: fx.now - 2000 + i * 100, elapsed: 30, review })),
+  });
+}
+const classified = dir => classify(readSession(dir), { now: fx.now, isAlive });
+
+test("an approval that recaps a fixed issue closes it; raising it later is a reopen", () => {
+  const { detail } = classified(storyOf("review-impl-20261010-103", [revise([1]), approveRecap([1]), revise([1])], [replyIn([1]), replyIn([])]));
+  assert.deepEqual(detail.ledger.find(i => i.id === 1).trail, ["raised", "fixed", "verified", "reopened"]);
+  assert.equal(detail.steps.find(x => x.strong === "Round 2").text, "approved");
+});
+
+test("a round with neither a verdict nor findings closes nothing", () => {
+  const { summary, detail } = classified(storyOf("review-impl-20261010-104", [revise([1]), "I could not finish the review.\n", revise([1])], [replyIn([1]), replyIn([])]));
+  assert.deepEqual(detail.ledger.find(i => i.id === 1).trail, ["raised", "fixed", "still open"]);
+  assert.equal(detail.steps.find(x => x.strong === "Round 2").text, "no verdict");
+  assert.deepEqual(summary.newIssues, { round: 3, count: 0, text: "1 still open" });
+});
+
+test("an issue raised again with no fix or dispute on record is open, not maintained", () => {
+  const { summary, detail } = classified(storyOf("review-impl-20261010-105", [revise([1]), revise([1])], []));
+  assert.deepEqual(summary.newIssues, { round: 2, count: 0, text: "1 open" });
+  assert.equal(detail.steps.find(x => x.strong === "Round 2").text, "1 open");
+});
+
+test("a stalemate keeps its label and counts the kept issues as maintained", () => {
+  const dir = storyOf("review-impl-20261010-106", [revise([1]), revise([1])], [replyIn([], [1])]);
+  const final = path.join(dir, "final.txt");
+  fs.writeFileSync(final, JSON.stringify({ ...JSON.parse(fs.readFileSync(final, "utf8")), convergence: { stalemate: true } }));
+  const { summary, detail } = classified(dir);
+  assert.equal(detail.steps.find(x => x.strong === "Round 2").text, "stalemate · 1 maintained");
+  assert.equal(summary.newIssues.text, "1 maintained");
+});
+
+test("a reviewer's own STALEMATE still tells a fix that did not hold from a kept dispute", () => {
+  const verdict = ids => revise(ids).replace("Status: REVISE", "Status: STALEMATE");
+  const { summary, detail } = classified(storyOf("review-impl-20261010-108", [revise([1, 2]), verdict([1, 2])], [replyIn([1], [2])]));
+  assert.equal(detail.steps.find(x => x.strong === "Round 2").text, "stalemate · 1 still open, 1 maintained");
+  assert.equal(summary.newIssues.text, "1 still open, 1 maintained");
+  // the reviewer's own verdict names no deadlocked set: the banner lists what is still open
+  assert.equal(detail.status.what, "Stalemate. Still open: ISSUE-1, ISSUE-2. You decide.");
+});
+
+test("a peer session the caller ended as a stalemate does not credit the reviewer with it", () => {
+  const dir = writeSession(path.join(tmp, "open-kinds", ".cross-review", "sessions"), "review-pr-20261010-111", {
+    skill: "review-pr", created: fx.now - 3000, inputs: ["## PR_TITLE\nInvented PR.\n"], meta: "STALEMATE",
+    rounds: [{ status: "completed", started: fx.now - 2000, elapsed: 30, review: "### Position\n- Invented.\n\n### VERDICT\n- Status: CONTINUE\n" }],
+  });
+  const { summary, detail } = classified(dir);
+  assert.equal(summary.state, "stalemate");
+  assert.equal(detail.status.next, "See the last exchange for context.");
+});
+
+test("DONE in a review session closes nothing: the listed issue is still open", () => {
+  const done = ids => revise(ids).replace("Status: REVISE", "Status: DONE");
+  const { summary, detail } = classified(storyOf("review-impl-20261010-109", [revise([1]), done([1])], [replyIn([1])]));
+  assert.deepEqual(detail.ledger.find(i => i.id === 1).trail, ["raised", "fixed", "still open"]);
+  assert.equal(summary.newIssues.text, "1 still open");
+});
+
+test("a heading repeated in one message is one issue with one outcome", () => {
+  const twice = id => issueBlock(id, "Invented defect") + "\n" + issueBlock(id, "Invented defect, again") + "\n### VERDICT\n- Status: REVISE\n- Reason: Invented.\n";
+  const { summary, detail } = classified(storyOf("review-impl-20261010-110", [twice(1), twice(1)], [replyIn([1])]));
+  assert.deepEqual(detail.ledger.find(i => i.id === 1).trail, ["raised", "fixed", "still open"]);
+  assert.equal(summary.newIssues.text, "1 still open");
+});
+
+test("an issue both fixed and disputed in one reply counts as fixed", () => {
+  const { summary, detail } = classified(storyOf("review-impl-20261010-107", [revise([1]), revise([1])], [replyIn([1], [1])]));
+  assert.deepEqual(detail.ledger.find(i => i.id === 1).trail, ["raised", "fixed", "still open"]);
+  assert.equal(summary.newIssues.text, "1 still open");
 });
 
 test("waiting, stopped and peer stories say what the mock says", () => {

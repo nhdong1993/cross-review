@@ -9,7 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { parseOutputMarkdown } from "../parse.js";
-import { computeNext, inputValues, isPeerSkill } from "../review-core.js";
+import { computeNext, inputValues, isPeerSkill, skillKind } from "../review-core.js";
 import { convergence, disputedIds, issueEntry, issueIds } from "../convergence.js";
 export { inputValues };
 import { getReviewer } from "../reviewers/index.js";
@@ -307,21 +307,35 @@ function buildStory(parsed, rounds) {
   const open = new Map(); // id → { agent: null|"fixed"|"disputed", closed }
   const story = [];
   for (const r of rounds) {
-    if (r.review) {
-      const blocks = Array.isArray(r.review.blocks) ? r.review.blocks.filter(b => b.prefix === "ISSUE" || b.prefix === undefined) : [];
+    const verdict = r.review ? verdictOf(r.final) : null;
+    const listed = r.review && Array.isArray(r.review.blocks) ? r.review.blocks.filter(b => b.prefix === "ISSUE" || b.prefix === undefined) : [];
+    if (r.review && !parsed.peer && !verdict && !listed.length) {
+      // neither a verdict nor findings: nothing was verified or closed, the issues stay as they were
+      story.push({ who: "rv", round: r.round, did: {}, noVerdict: true, verdict: null });
+    } else if (r.review) {
+      // a success that lists issues again only recaps them: every open issue closes. DONE is a
+      // success only for an implementation session; in a review it asks for a response.
+      const success = !parsed.peer && (verdict === "APPROVE" || (verdict === "DONE" && skillKind(parsed.skill) === "implement"));
+      const blocks = success ? [] : listed;
       const ids = new Set(blocks.map(b => b.id));
-      const stale = verdictOf(r.final) === "STALEMATE";
+      const stale = verdict === "STALEMATE";
       const did = {};
+      const seen = new Set(); // one transition per issue per round, however often its heading repeats
       for (const b of blocks) {
+        if (seen.has(b.id)) continue;
+        seen.add(b.id);
         issues.set(b.id, { ...issueInfo(b), first: issues.get(b.id)?.first ?? r.round });
         const st = open.get(b.id);
         if (!st || st.closed) {
-          did[b.id] = "raised";
+          // closed in an earlier round and raised again: the fix did not hold
+          did[b.id] = st ? "reopened" : "raised";
           open.set(b.id, { agent: null, closed: false });
         } else {
-          if (stale) did[b.id] = "stalemate";
-          else if (st.agent === "disputed") did[b.id] = "maintained";
+          // a stalemate round says the same per issue as any other; its step adds the verdict
+          if (st.agent === "disputed") did[b.id] = "maintained";
           else if (st.agent === "fixed") did[b.id] = "still open";
+          // no fix or dispute on record (a reply that skipped it, or a low-level resume)
+          else did[b.id] = "open";
           st.agent = null;
         }
       }
@@ -330,7 +344,7 @@ function buildStory(parsed, rounds) {
         did[id] = st.agent === "fixed" ? "verified" : st.agent === "disputed" ? "withdrawn" : "closed";
         st.closed = true;
       }
-      story.push({ who: "rv", round: r.round, did, stale, verdict: verdictOf(r.final) });
+      story.push({ who: "rv", round: r.round, did, stale, verdict });
     } else if (!r.running && r.final) {
       story.push({ who: "rv", round: r.round, did: {}, failed: true });
     } else if (!r.running && r.status === "stopped" && r.completedAt) {
@@ -340,7 +354,8 @@ function buildStory(parsed, rounds) {
     if (reply) {
       const did = {};
       if (!reply.peer) {
-        for (const [kind, list] of [["fixed", reply.fixed], ["disputed", reply.disputed]]) {
+        // an id both fixed and disputed (a partial fix) counts as fixed, as in convergence.disputedIds
+        for (const [kind, list] of [["disputed", reply.disputed], ["fixed", reply.fixed]]) {
           for (const x of list) {
             const st = open.get(x.id);
             if (!st || st.closed) continue;
@@ -363,7 +378,7 @@ function buildLedger(story, issues, pending) {
     const trail = story.filter(x => x.did[id]).map(x => x.did[id]);
     const last = trail[trail.length - 1];
     const item = { ...info, trail, pending: null };
-    if (pending && last && !TERMINAL.has(last) && last !== "stalemate") item.pending = pending;
+    if (pending && last && !TERMINAL.has(last)) item.pending = pending;
     out.push(item);
   }
   return out;
@@ -397,15 +412,26 @@ function issuesColumn(ledger, peer) {
   return `${ledger.length}: ${parts.map(([k, n]) => `${n} ${k}`).join(", ")}`;
 }
 
+/**
+ * What a review round did to issues it did not close: "1 new, 1 reopened, 1 still open, 1 maintained,
+ * 1 open"; "" for none.
+ */
+function openKinds(did) {
+  const n = (...ds) => Object.values(did).filter(x => ds.includes(x)).length;
+  return [[n("raised"), "new"], [n("reopened"), "reopened"], [n("still open"), "still open"], [n("maintained"), "maintained"], [n("open"), "open"]]
+    .filter(([k]) => k).map(([k, word]) => `${k} ${word}`).join(", ");
+}
+
 function stepLabel(x, peer) {
   if (x.who === "rv") {
-    const raised = Object.values(x.did).filter(d => d === "raised").length;
+    const open = openKinds(x.did);
     let text;
     if (x.failed) text = "stopped";
+    else if (x.noVerdict) text = "no verdict";
     else if (x.verdict === "APPROVE") text = "approved";
-    else if (x.stale) text = "stalemate";
+    else if (x.stale) text = open ? `stalemate · ${open}` : "stalemate";
     else if (x.verdict === "CONSENSUS") text = "consensus";
-    else if (raised) text = `${raised} new`;
+    else if (open) text = open;
     else if (peer) text = "replied";
     else text = "maintained";
     return { strong: `Round ${x.round}`, text };
@@ -453,10 +479,21 @@ function statusSentences(cls, ctx) {
     return { what: `Consensus in round ${R}.`, next: "Both sides agree. Their positions are in the last messages." };
   }
   if (cls.state === "stalemate") {
-    const ids = ledger.filter(i => i.trail[i.trail.length - 1] === "stalemate" || i.trail[i.trail.length - 1] === "maintained").map(i => `ISSUE-${i.id}`);
+    // only the runner's convergence check knows which issues are deadlocked; a reviewer's own
+    // STALEMATE can also list issues both sides agree on, so those are only "still open"
+    const conv = last && last.final && last.final.convergence;
+    if (conv && conv.stalemate) {
+      const ids = Array.isArray(conv.unchanged_issue_ids) ? conv.unchanged_issue_ids.map(id => `ISSUE-${id}`) : [];
+      return {
+        what: ids.length ? `Stalemate on ${ids.join(", ")}. You decide.` : "Stalemate. You decide.",
+        next: "Both sides held their positions for two rounds without new evidence. Their arguments are in the last messages.",
+      };
+    }
+    const open = ledger.filter(i => !TERMINAL.has(i.trail[i.trail.length - 1])).map(i => `ISSUE-${i.id}`);
     return {
-      what: ids.length ? `Stalemate on ${ids.join(", ")}. You decide.` : "Stalemate. You decide.",
-      next: "Both sides held their positions for two rounds without new evidence. Their arguments are in the last messages.",
+      what: open.length ? `Stalemate. Still open: ${open.join(", ")}. You decide.` : "Stalemate. You decide.",
+      // the caller can end a peer session as a stalemate while the reviewer asked to go on
+      next: "See the last exchange for context.",
     };
   }
   if (cls.state === "waiting") {
@@ -578,7 +615,8 @@ export function classify(parsed, { now = Math.floor(Date.now() / 1000), isAlive 
 
   const reviewerSeconds = rounds.reduce((t, r) => t + (r.running ? 0 : r.secs || 0), 0);
   const lastVerdict = [...rounds].reverse().find(r => verdictOf(r.final));
-  const lastReview = peer ? null : story.findLast(x => x.who === "rv" && !x.failed);
+  // a round without a verdict or findings changed nothing: the review before it still stands
+  const lastReview = peer ? null : story.findLast(x => x.who === "rv" && !x.failed && !x.noVerdict);
   const summary = {
     id: parsed.id,
     skill: parsed.skill,
@@ -596,8 +634,9 @@ export function classify(parsed, { now = Math.floor(Date.now() / 1000), isAlive 
     verdict: lastVerdict ? verdictOf(lastVerdict.final) : null,
     issues: issuesColumn(ledger, peer),
     issueCount: ledger.length,
-    // what the latest finished review raised; null before one and for peer skills
-    newIssues: lastReview ? { round: lastReview.round, count: Object.values(lastReview.did).filter(d => d === "raised").length } : null,
+    // what the latest finished review left open: new, reopened, still open, maintained; null before one and for peer skills
+    // count stays for a page loaded before this text existed (an update before a restart)
+    newIssues: lastReview ? { round: lastReview.round, count: Object.values(lastReview.did).filter(d => d === "raised").length, text: openKinds(lastReview.did) } : null,
     model: state.model || null,
     reviewer: state.reviewer || "codex",
     caller: state.caller && state.caller.name ? { name: String(state.caller.name), title: state.caller.title ? String(state.caller.title) : null } : null,

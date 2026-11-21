@@ -750,6 +750,27 @@ try {
     await d4.close();
   }
 
+  // In progress names what the latest review kept open: an issue the agent fixed that still
+  // reproduces, and one it disputed that the reviewer kept
+  const openRoot = path.join(tmp, "open-kinds");
+  const openNow = Math.floor(Date.now() / 1000);
+  const block = id => `### ISSUE-${id}: Invented defect ${id}\n- Category: bug\n- Severity: medium\n- Problem: Invented.\n`;
+  const revise = ids => ids.map(block).join("\n") + "\n### VERDICT\n- Status: REVISE\n- Reason: Invented.\n";
+  writeSession(path.join(openRoot, "ledger", ".cross-review", "sessions"), "review-impl-20261015-600", {
+    skill: "review-impl", mode: "working-tree", created: openNow - 600,
+    inputs: ["## USER_REQUEST\nInvented request.\n", "## FIXED_ITEMS\nISSUE-1: Invented — fixed in src/a.js:1\n\n## DISPUTED_ITEMS\nISSUE-2: Invented — not a defect\n"],
+    rounds: [{ status: "completed", started: openNow - 500, elapsed: 30, review: revise([1, 2]) }, { status: "completed", started: openNow - 300, elapsed: 30, review: revise([1, 2]) }],
+  });
+  const d5 = await startDashboard({ root: openRoot, port: 0, open: false, discoveryFile: null, catalogs });
+  const openPage = await browser.newPage(1400, 900);
+  try {
+    await openPage.goto(`${d5.url}#/`);
+    await openPage.waitFor(`document.querySelectorAll("#active tr[data-go]").length === 1`);
+    assert.equal(await openPage.evaluate(`document.querySelector("#active tr[data-go]").cells[2].querySelector(".line2").textContent`), "2 issues · 1 still open, 1 maintained in round 2");
+  } finally {
+    await d5.close();
+  }
+
   // Nothing in progress: the words alone
   const empty = await browser.newPage(1400, 900);
   const emptyRoot = path.join(tmp, "empty");

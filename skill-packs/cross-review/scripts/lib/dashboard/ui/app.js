@@ -191,12 +191,15 @@ const modelOf = s => {
   return c && c.defaultModel ? `${modelName(c.defaultModel, c.models)} · ${label} default` : `${label} default`;
 };
 
-/** In progress: all issues so far and what the latest finished review raised; "" before the first review. */
+/** In progress: all issues so far and what the latest finished review left open (new, reopened,
+ * still open after a fix, kept after a dispute); "" before the first review. */
 function issuesNow(s) {
   const n = s.newIssues;
   if (!n) return "";
   if (!s.issueCount) return `No issues in round ${n.round}`;
-  return `${s.issueCount} ${s.issueCount === 1 ? "issue" : "issues"} · ${n.count || "none"} new in round ${n.round}`;
+  // a server from before `text` sends only count
+  const text = n.text ?? (n.count ? `${n.count} new` : "");
+  return `${s.issueCount} ${s.issueCount === 1 ? "issue" : "issues"} · ${text || "none new"} in round ${n.round}`;
 }
 
 function activeRow(s) {
