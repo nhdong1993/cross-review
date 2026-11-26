@@ -132,10 +132,19 @@
 <section id="tests" class="view">
   <h1>Tests on this machine</h1>
   <div class="sub">The machine-wide test queue (test-slot): one heavy test or build runs at a time, in any workspace; the others wait for it. Updates live.</div>
+  <p class="note" id="test-observer" hidden>Resource observer is not running — figures and estimates are unavailable. Setup is in the agent-rules README (<code>bin/test-slot-usage</code>).</p>
+  <div id="test-host"></div>
   <table class="gap">
     <thead><tr><th class="w-state">State</th><th>Run</th><th class="num w-for">Waited</th><th class="num w-for">Running</th></tr></thead>
     <tbody id="test-runs"></tbody>
   </table>
+  <div id="test-history-block" hidden>
+    <h2>Recent runs</h2>
+    <table>
+      <thead><tr><th>Run</th><th class="num w-for">Ended</th><th class="num w-exit">Exit</th></tr></thead>
+      <tbody id="test-history"></tbody>
+    </table>
+  </div>
   <p class="sub small">Defaults for the queue (workers, wait, kill grace) are under <a href="#/settings">Settings → Testing</a>.</p>
 </section>
 

@@ -17,7 +17,7 @@ import { findChrome, launchChrome } from "./helpers/chrome.js";
 import { startDashboard } from "../skill-packs/cross-review/scripts/lib/dashboard/server.js";
 import { GITIGNORE } from "../skill-packs/cross-review/scripts/lib/config.js";
 import { parsePlan } from "../skill-packs/cross-review/scripts/lib/plans.js";
-import { readTestRuns, testSlotPaths } from "../skill-packs/cross-review/scripts/lib/dashboard/test-slot.js";
+import { readTestRuns, readTests, testSlotPaths } from "../skill-packs/cross-review/scripts/lib/dashboard/test-slot.js";
 
 /** A saved settings file with Codex's fields (written under reviewers.codex) read at the top level. */
 const savedCodex = file => {
@@ -843,6 +843,7 @@ try {
 
   await plansChecks(browser);
   await testSlotChecks(browser);
+  await testObservationChecks(browser);
 
   console.log(`dashboard-ui: ok (${dom.active.length} in progress, ${dom.history} of ${sessions.history.length} in history on the first page)`);
   console.log(`screenshots: ${shots}`);
@@ -1472,5 +1473,117 @@ async function testSlotChecks(browser) {
     assert.equal(await page.evaluate(`document.getElementById("testing-block").classList.contains("on")`), false);
   } finally {
     await d2.close();
+  }
+}
+
+// ---------- Tests tab: what the observer measured (test-resource-observation plan) ----------
+
+async function testObservationChecks(browser) {
+  const root = path.join(tmp, "obs-root");
+  fs.mkdirSync(path.join(root, "quarry", ".cross-review", "sessions"), { recursive: true });
+  const p = testSlotPaths({ CROSS_REVIEW_AGENTS_DIR: path.join(tmp, "obs-agents") });
+  fs.mkdirSync(p.dir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(p.lock, "");
+  const runRoot = path.dirname(p.dir);
+  const now = Math.floor(Date.now() / 1000);
+  const rec = r => fs.writeFileSync(path.join(p.dir, `${r.pid}.json`), JSON.stringify({ v: 1, pstart: "A", ...r }));
+  rec({ pid: 2001, state: "running", queued_at: now - 60, running_at: now - 40, payload: 2011, label: "cargo test", repo: "app", worktree: "feature" });
+  rec({ pid: 2002, state: "waiting", queued_at: now - 30, label: "vitest", repo: "web", worktree: "main" });
+  rec({ pid: 2003, state: "waiting", queued_at: now - 20, label: "go test", repo: "svc", worktree: "main" });
+  rec({ pid: 2004, state: "waiting", queued_at: now - 10, label: "pytest", repo: "tool", worktree: "main" });
+  rec({ pid: 2005, state: "waiting", queued_at: now - 5, label: "custom", repo: "old", worktree: "main" });
+  const rows = [2001, 2002, 2003, 2004, 2005].map(pid => ({ pid, ppid: 1, stat: pid === 2005 ? "T" : "S", lstart: "A" })).concat([{ pid: 2900, ppid: 1, stat: "S", lstart: "O" }]);
+  const sample = (f = {}) => ({
+    v: 1, pid: 2900, pstart: "O", at: Math.floor(Date.now() / 1000), dt: 5, cost: { ticks: 9, cpu_s: 0.3 },
+    host: { ncpu: 14, idle_cores: f.idle ?? 9.25, pressure: 2, avail_mb: f.avail ?? 2900, swapout_pages_s: 0, swapin_pages_s: 3 },
+    vm: { n: 2, cpu_pct: 140, mem_mb: 1400, mem_low: false },
+    runs: [{ pid: 2001, pstart: "A", tree: { n: 4, cpu_pct: f.cpu ?? 210, mem_mb: f.mem ?? 812, rss_mb: 300, mem_low: false }, peak: { cpu_pct: 260, mem_mb: f.peak ?? 1536, samples: 7, mem_low: false }, partial: false }],
+    waiters: [
+      { pid: 2002, pstart: "A", est_state: "measured", est_mb: 614, est_cores: 2, est_s: 40, est_n: 5 },
+      { pid: 2003, pstart: "A", est_state: "unmeasured" }, { pid: 2004, pstart: "A", est_state: "unknown" }, { pid: 2005, pstart: "A", est_state: "overrun" },
+    ],
+    shadow: { pid: 2002, pstart: "A", incumbent: { pid: 2001, pstart: "A" }, passed: f.passed ?? false, reason: f.passed ? "passed" : "memory" },
+  });
+  const put = doc => fs.writeFileSync(path.join(runRoot, "test-slot.observer.json"), JSON.stringify(doc));
+  const hl = (i, o = {}) => JSON.stringify({ v: 1, id: `h${i}`, key: "k", started_at: now - 600 + i, ended_at: now - 500 + i * 60, repo: "app", worktree: "feature", label: "cargo test", wait_s: 12, dur_s: 95, exit: 0, est_mb: 512, peak: { mem_mb: 1228.8, cpu_pct: 230, samples: 9, mem_low: false }, partial: false, heads_total: 0, heads_passed: 0, heads_exact: true, shadow: [], ...o });
+  fs.writeFileSync(path.join(runRoot, "test-slot.history.jsonl"), [hl(1), hl(2, { exit: 101, label: "vitest", repo: "web", worktree: "main", heads_total: 3, heads_passed: 1 }), hl(3, { label: "go test", repo: "svc", peak: null, partial: true, heads_total: 200, heads_passed: 2, heads_exact: false })].join("\n") + "\n");
+  put(sample());
+  const testRuns = () => readTests({ paths: p, processRows: () => rows, step: () => null });
+  const d = await startDashboard({ root, port: 0, open: false, discoveryFile: null, catalogs, tickMs: 300, testSlot: p, testRuns });
+  const runs = `[...document.querySelectorAll("#test-runs tr")].map(tr => tr.cells[1].innerText.replace(/\\s+/g, " ").trim())`;
+  const hist = `[...document.querySelectorAll("#test-history tr")].map(tr => [...tr.cells].map(c => c.innerText.replace(/\\s+/g, " ").trim()))`;
+  const strip = `document.getElementById("test-host").innerText.replace(/\\s+/g, " ").trim()`;
+  try {
+    const page = await browser.newPage(1400, 1100);
+    await page.goto(`${d.url}#/tests`);
+    await page.waitFor(`document.querySelectorAll("#test-runs tr").length === 5 && document.querySelectorAll("#test-history tr").length === 3`);
+    let r = await page.evaluate(runs);
+    assert.equal(r[0], "cargo test app · feature CPU 2.1 cores · memory 812 MB now, 1.5 GB peak");
+    assert.equal(r[1], "vitest web · main ≈ 614 MB · 2.0 cores · 0:40 (5 runs) · resource checks: waiting for memory");
+    assert.equal(r[2], "go test svc · main not measured yet");
+    assert.equal(r[3], "pytest tool · main —");
+    assert.equal(r[4], "custom old · main over its budget · stopped");
+    assert.match(await page.evaluate(`document.querySelector("#test-runs tr:nth-child(2) .usage span").title`), /observation only.*nothing is admitted/);
+    assert.equal(await page.evaluate(strip), "Memory headroom ≈ 2.8 GB Pressure Warning Idle cores 9.3 of 14 Swap-out 0 pages/s VM processes 2 · 1.4 cores · 1.4 GB (all VM work, not this run)");
+    assert.equal(await page.evaluate(`document.getElementById("test-observer").hidden`), true);
+    const h = await page.evaluate(hist);
+    assert.equal(h[0][0], "go test svc · feature · waited 0:12 · ran 1:35 · peak —, — · partial · at least 2 of at least 200 waiting heads passed resource checks");
+    assert.equal(h[1][0], "vitest web · main · waited 0:12 · ran 1:35 · peak 1.2 GB, 2.3 cores · 1 of 3 waiting heads passed resource checks");
+    assert.equal(h[1][2], "101");
+    assert.equal(await page.evaluate(`document.querySelector("#test-history tr:nth-child(2) td:last-child .bad") !== null`), true, "a non-zero exit is marked");
+    assert.equal(h[2][0], "cargo test app · feature · waited 0:12 · ran 1:35 · peak 1.2 GB, 2.3 cores");
+    assert.equal(h[2][2], "0");
+    await page.screenshot(path.join(shots, "tests-observed-1400.png"));
+    // other numbers give other text; a passed decision says under which assumption; a real zero is 0.0, not a dash
+    put(sample({ cpu: 0, mem: 2048, peak: 2048, idle: 0, avail: 512, passed: true }));
+    await page.waitFor(`/2\\.0 GB now/.test(document.querySelector("#test-runs tr").cells[1].innerText)`);
+    r = await page.evaluate(runs);
+    assert.equal(r[0], "cargo test app · feature CPU 0.0 cores · memory 2.0 GB now, 2.0 GB peak");
+    assert.equal(r[1], "vitest web · main ≈ 614 MB · 2.0 cores · 0:40 (5 runs) · resource checks passed (if both repos were eligible)");
+    assert.match(await page.evaluate(strip), /^Memory headroom ≈ 512 MB Pressure Warning Idle cores 0\.0 of 14 /);
+    // missing figures are a dash; a lower bound says so; a partial run is marked
+    const low = sample();
+    low.runs[0].tree = null;
+    low.runs[0].peak = { cpu_pct: null, mem_mb: 700, samples: 2, mem_low: true };
+    low.runs[0].partial = true;
+    low.host.idle_cores = null;
+    low.host.swapout_pages_s = null;
+    low.vm = { n: 0, cpu_pct: null, mem_mb: null, mem_low: false };
+    put(low);
+    await page.waitFor(`/partial/.test(document.querySelector("#test-runs tr").cells[1].innerText)`);
+    assert.equal((await page.evaluate(runs))[0], "cargo test app · feature CPU — · memory — now, at least 700 MB peak · partial");
+    assert.equal(await page.evaluate(strip), "Memory headroom ≈ 2.8 GB Pressure Warning Idle cores — Swap-out —");
+    // phone and tablet: nothing wider than the screen
+    for (const [w, hgt, name] of [[390, 844, "390"], [768, 1024, "768"]]) {
+      put(sample());
+      const small = await browser.newPage(w, hgt);
+      await small.goto(`${d.url}#/tests`);
+      await small.waitFor(`document.querySelectorAll("#test-runs tr").length === 5 && document.querySelectorAll("#test-history tr").length === 3 && document.getElementById("test-host").innerText.length > 20`);
+      const m = await small.evaluate(`(() => ({ w: innerWidth, page: document.documentElement.scrollWidth, right: Math.max(...[...document.querySelectorAll("#tests table, #tests .strip")].map(e => e.getBoundingClientRect().right)) }))()`);
+      assert.ok(m.page <= m.w + 1 && m.right <= m.w + 1, `Tests tab fits ${name}px: ${JSON.stringify(m)}`);
+      await small.screenshot(path.join(shots, `tests-observed-${name}.png`));
+    }
+    // the observer stops: its sample ages out; rows and history stay, with a notice and no stale numbers shown as live
+    const old = sample();
+    old.at -= 60;
+    put(old);
+    await page.waitFor(`!document.getElementById("test-observer").hidden`);
+    assert.match(await page.evaluate(`document.getElementById("test-observer").innerText`), /Resource observer is not running/);
+    r = await page.evaluate(runs);
+    assert.equal(r[0], "cargo test app · feature figures are stale");
+    assert.equal(r[1], "vitest web · main");
+    assert.equal(await page.evaluate(strip), "");
+    assert.equal((await page.evaluate(hist)).length, 3, "history does not depend on the observer");
+    // no observer file at all
+    fs.rmSync(path.join(runRoot, "test-slot.observer.json"));
+    await page.waitFor(`document.querySelector("#test-runs tr").cells[1].innerText.replace(/\\s+/g, " ").trim() === "cargo test app · feature"`);
+    // an empty queue with a running observer: no strip figures, one line instead, history still there
+    for (const f of fs.readdirSync(p.dir)) fs.rmSync(path.join(p.dir, f));
+    put({ ...sample(), host: null, vm: null, runs: [], waiters: [], shadow: null });
+    await page.waitFor(`document.querySelector("#test-runs .empty-state") && document.getElementById("test-host").innerText.trim() === "Machine figures appear while a test runs." && document.getElementById("test-observer").hidden`);
+    assert.equal((await page.evaluate(hist)).length, 3);
+    await page.screenshot(path.join(shots, "tests-observed-idle-1400.png"));
+  } finally {
+    await d.close();
   }
 }
