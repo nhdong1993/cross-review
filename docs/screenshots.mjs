@@ -23,6 +23,8 @@ if (!bin) {
 
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "readme-shots-")));
 process.env.HOME = path.join(tmp, "home");
+process.env.USERPROFILE = process.env.HOME; // os.homedir() reads USERPROFILE on Windows
+delete process.env.CROSS_REVIEW_AGENTS_DIR; // test-slot under the temporary HOME, never this machine's
 const root = path.join(process.env.HOME, "projects");
 const fx = buildFixture(root, { now: Math.floor(Date.now() / 1000), livePid: process.pid });
 buildPlans(fx);

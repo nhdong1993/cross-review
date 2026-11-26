@@ -1,0 +1,18 @@
+[
+  { "name": "nested script under a shell", "entries": [{ "exe": "/bin/sleep", "argv": ["sleep", "5"] }, { "exe": "/usr/local/bin/node", "argv": ["node", "./stage.mjs", "--flag", "SENTINEL_ARG"] }, { "exe": "/bin/bash", "argv": ["bash", "-c", "node ./stage.mjs SENTINEL_ARG"] }], "want": { "program": "node", "script": "./stage.mjs" } },
+  { "name": "native payload alone", "entries": [{ "exe": "/bin/sleep", "argv": ["sleep", "SENTINEL_ARG"] }], "want": { "program": "sleep" } },
+  { "name": "spaced local path", "entries": [{ "exe": "/usr/bin/node", "argv": ["node", "./stage with space.mjs"] }], "want": { "program": "node", "script": "./stage with space.mjs" } },
+  { "name": "option before the script", "entries": [{ "exe": "/usr/bin/node", "argv": ["node", "--require=./SENTINEL.cjs", "./stage.mjs"] }], "want": { "program": "node" } },
+  { "name": "changed process title", "entries": [{ "exe": "/usr/bin/node", "argv": ["SENTINEL.js", "--title=SENTINEL.js"] }], "want": { "program": "node" } },
+  { "name": "bun package task", "entries": [{ "exe": "/opt/bun/bin/bun", "argv": ["bun", "SENTINEL.js"] }], "want": { "program": "bun" } },
+  { "name": "deno module URL", "entries": [{ "exe": "/usr/bin/deno", "argv": ["deno", "https://example.test/mod.ts?token=SENTINEL.ts"] }], "want": { "program": "deno" } },
+  { "name": "node entry URL with a query", "entries": [{ "exe": "/usr/bin/node", "argv": ["node", "./stage.mjs?version=SENTINEL.mjs"] }], "want": { "program": "node" } },
+  { "name": "punctuated script stops the walk", "entries": [{ "exe": "/usr/bin/node", "argv": ["node", "./phase#5.mjs"] }, { "exe": "/bin/bash", "argv": ["bash", "./run.sh"] }], "want": { "program": "node" } },
+  { "name": "shell -c is not a script", "entries": [{ "exe": "/bin/bash", "argv": ["bash", "-c", "echo SENTINEL.sh"] }], "want": { "program": "bash" } },
+  { "name": "framework python", "entries": [{ "exe": "/Library/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python", "argv": ["python3", "tests/run.py", "SENTINEL_ARG"] }], "want": { "program": "Python", "script": "tests/run.py" } },
+  { "name": "versioned python", "entries": [{ "exe": "/usr/bin/python3.12", "argv": ["python3", "-m", "pytest"] }], "want": { "program": "python3.12" } },
+  { "name": "first of two scripts, deepest first: b", "entries": [{ "exe": "/usr/bin/node", "argv": ["node", "b.mjs"] }, { "exe": "/usr/bin/node", "argv": ["node", "a.mjs"] }, { "exe": "/bin/bash", "argv": ["bash"] }], "want": { "program": "node", "script": "b.mjs" } },
+  { "name": "first of two scripts, deepest first: a", "entries": [{ "exe": "/usr/bin/node", "argv": ["node", "a.mjs"] }, { "exe": "/usr/bin/node", "argv": ["node", "b.mjs"] }, { "exe": "/bin/bash", "argv": ["bash"] }], "want": { "program": "node", "script": "a.mjs" } },
+  { "name": "unreadable deeper process", "entries": [null, { "exe": "/bin/sleep", "argv": ["sleep", "1"] }], "want": { "program": "sleep" } },
+  { "name": "nothing readable", "entries": [null], "want": null }
+]

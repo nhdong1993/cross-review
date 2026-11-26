@@ -30,6 +30,7 @@ html { scroll-padding-top: var(--head); }
 .top nav .i { width: 17px; height: 17px; vertical-align: -3px; margin-right: 7px; }
 .top nav a.on { color: var(--ink); font-weight: 500; box-shadow: inset 0 -2px 0 var(--ink); }
 .top nav a:hover { text-decoration: none; color: var(--ink); }
+.top nav a[hidden] { display: none; }
 .top .where { margin-left: auto; color: var(--muted); font-size: 13px; }
 main.wrap { padding-top: 28px; padding-bottom: 24px; }
 #settings { max-width: 860px; }   /* a form reads best narrow; all its parts share this right edge */
@@ -57,6 +58,17 @@ body { padding-bottom: var(--foot); }
 .site-foot a { color: var(--soft); }
 .site-foot a.new { color: var(--amber); font-weight: 500; }
 #updates-block { display: none; } #updates-block.on { display: block; }
+#testing-block { display: none; } #testing-block.on { display: block; }
+#test-runs td.run .line2 { overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  #tests th.w-state, #tests th.w-for { width: auto; }
+  /* phones: the tabs show their icons only (the label stays their accessible name), so all four fit */
+  .wrap { padding: 0 16px; }
+  .top .wrap { gap: 20px; }
+  .top .where { display: none; }
+  .top nav a { font-size: 0; margin-right: 18px; }
+  .top nav .i { margin-right: 0; }
+}
 label.check { margin-right: 12px; }
 label.check input { vertical-align: -1px; margin: 0 6px 0 0; }
 .status .what .i { width: 18px; height: 18px; vertical-align: -3px; margin-right: 8px; }
@@ -64,8 +76,9 @@ label.check input { vertical-align: -1px; margin: 0 6px 0 0; }
 
 /* tables */
 .filters { display: flex; gap: 14px; align-items: center; margin: 6px 0 10px; color: var(--soft); font-size: 13px; }
-select, input[type=text] { font: inherit; color: var(--ink); background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px; padding: 4px 8px; }
+select, input[type=text], input[type=number] { font: inherit; color: var(--ink); background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px; padding: 4px 8px; }
 input[type=text] { flex: 1; max-width: 340px; }
+input[type=number] { width: 7em; }
 table { width: 100%; border-collapse: collapse; }
 th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 6px 10px; border-bottom: 1px solid var(--ink); }
 td { padding: 9px 10px; border-bottom: 1px solid var(--rule); vertical-align: top; }
@@ -232,6 +245,7 @@ th.right, td.right { text-align: right; }
 .save-state.on { opacity: 1; }
 .save-state.saved { color: var(--green); }
 .save-state.failed { color: var(--red); border-color: #e9c9c4; }
+.save-state.warn { color: var(--amber); }
 input.other { display: none; width: 220px; flex: none; }
 input.other.on { display: inline-block; }
 #clear-ws.off { display: none; }

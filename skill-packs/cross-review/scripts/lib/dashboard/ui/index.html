@@ -11,7 +11,7 @@
 <body>
 <div class="top"><div class="wrap">
   <div class="name"><img class="logo" src="avatars/reviewer.png" alt="">cross-review</div>
-  <nav><a href="#/" data-nav="sessions" data-i="list">Sessions</a><a href="#/plans" data-nav="plans" data-i="plans">Plans</a><a href="#/settings" data-nav="settings" data-i="sliders">Settings</a></nav>
+  <nav><a href="#/" data-nav="sessions" data-i="list">Sessions</a><a href="#/plans" data-nav="plans" data-i="plans">Plans</a><a href="#/tests" data-nav="tests" data-i="test" hidden>Tests</a><a href="#/settings" data-nav="settings" data-i="sliders">Settings</a></nav>
   <div class="where" id="where"></div>
 </div></div>
 
@@ -129,6 +129,16 @@
   <p class="notfound" id="p-gone" hidden>This plan is no longer in .cross-review/plans/. <a href="#/plans">Back to Plans</a></p>
 </section>
 
+<section id="tests" class="view">
+  <h1>Tests on this machine</h1>
+  <div class="sub">The machine-wide test queue (test-slot): one heavy test or build runs at a time, in any workspace; the others wait for it. Updates live.</div>
+  <table class="gap">
+    <thead><tr><th class="w-state">State</th><th>Run</th><th class="num w-for">Waited</th><th class="num w-for">Running</th></tr></thead>
+    <tbody id="test-runs"></tbody>
+  </table>
+  <p class="sub small">Defaults for the queue (workers, wait, kill grace) are under <a href="#/settings">Settings → Testing</a>.</p>
+</section>
+
 <section id="settings" class="view">
   <h1>Settings</h1>
   <div class="scope">
@@ -173,6 +183,16 @@
       <div>Check for updates</div><div><label class="check"><input type="checkbox" id="f-updates"> When the dashboard starts (at most every 3 days) and every 6 hours while it runs</label> <button class="plain" id="check-update">Check now</button><div class="help" id="update-help"></div></div>
     </div>
     <p class="sub small">A check reads the latest version on npm; nothing about you or your sessions is sent.</p>
+  </div>
+
+  <div id="testing-block">
+    <h2>Testing</h2>
+    <div class="form">
+      <div><label for="f-ts-jobs">Workers</label></div><div><input type="number" id="f-ts-jobs" min="1" step="1" inputmode="numeric"><div class="help">Worker processes one test run may use (Vitest, Cargo, Go, pytest-xdist).</div></div>
+      <div><label for="f-ts-wait">Wait for the slot</label></div><div><input type="number" id="f-ts-wait" min="0" step="1" inputmode="numeric"> seconds<div class="help">How long a run queues before it gives up without running. 0 gives up at once.</div></div>
+      <div><label for="f-ts-grace">Kill grace</label></div><div><input type="number" id="f-ts-grace" min="0" step="1" inputmode="numeric"> seconds<div class="help">After a cancelled run is asked to stop, how long it gets before it is killed.</div></div>
+    </div>
+    <p class="sub small">For every workspace on this computer, from the next run on. Saved in <span class="mono" id="ts-path"></span>; a <span class="mono">TEST_SLOT_*</span> value set for a run still wins. <span class="warn" id="ts-invalid"></span></p>
   </div>
 
   <div class="actions">

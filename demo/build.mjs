@@ -77,6 +77,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 async function main() {
   const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cr-demo-")));
   process.env.HOME = path.join(tmp, "home");
+  process.env.USERPROFILE = process.env.HOME; // os.homedir() reads USERPROFILE on Windows
+  delete process.env.CROSS_REVIEW_AGENTS_DIR; // test-slot under the temporary HOME, never this machine's
   const root = path.join(process.env.HOME, "projects");
   const ws = story.buildTree(root);
   const steps = timeline();

@@ -3,7 +3,8 @@
 // It only reads session and plan files (its git commands are read-only); it writes
 // ~/.cross-review/dashboard.json, the settings (~/.cross-review/config.json,
 // <workspace>/.cross-review/config.json), <workspace>/.cross-review/.gitignore when Plans in git
-// is saved, the avatars in ~/.cross-review/avatars/, and the opt-in ~/.cross-review/dashboard-token.
+// is saved, the avatars in ~/.cross-review/avatars/, the opt-in ~/.cross-review/dashboard-token, and the
+// machine's test queue defaults in ~/.agents/test-slot.conf (Testing; see test-slot.js).
 //
 //   startDashboard({root, port, open, idleExitSeconds, keepToken}) → {url, port, token, root, close(), closed}
 //   runDashboardCli(argv) → exit code (the `dashboard` command)
@@ -27,6 +28,7 @@ import { fillCommits, gitPlanFacts, gitWatch, listPlans, parsePlan, planProgress
 import { DEFAULT_REVIEWER, REVIEWER_NAMES, getReviewer } from "../reviewers/index.js";
 import { mergeForm } from "./ui/settings.js";
 import { fetchLatestVersion, isNewer, readUpdateCache, UPDATE_TTL_S, updateCachePath, writeUpdateCache } from "./update.js";
+import { readTestRuns, readTestSlotConf, saveTestSlotKey, testSlotPaths, TestSlotError } from "./test-slot.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const UI_DIR = path.join(HERE, "ui");
@@ -123,7 +125,7 @@ const sessionFiles = dir => signatureParts(dir).filter(p => !ACTIVITY_FILE.test(
  * Subscribers get the full list on subscribe and again whenever it differs from what they
  * were last sent.
  */
-export function createListWatcher({ root, now = () => Math.floor(Date.now() / 1000), rescanMs = 10000, tickMs = 1000, gitMs = 600000, isAlive = pidAlive, depth = SCAN_DEPTH } = {}) {
+export function createListWatcher({ root, now = () => Math.floor(Date.now() / 1000), rescanMs = 10000, tickMs = 1000, gitMs = 600000, isAlive = pidAlive, depth = SCAN_DEPTH, testRuns = () => readTestRuns() } = {}) {
   const realRoot = fs.realpathSync(root);
   const version = packVersion();
   const scanned = new Map(); // ws key → absolute path
@@ -409,6 +411,12 @@ export function createListWatcher({ root, now = () => Math.floor(Date.now() / 10
     return { root: realRoot, rootDisplay: tildePath(realRoot), depth, version, workspaces: list, archivedWorkspaces, active, history, plans };
   }
 
+  // The list the page shows, with the machine's test queue (agent-rules test-slot): one readdir, plus ps and the
+  // argument reader only while a run is recorded; only for the list stream and /api/sessions, which publish it.
+  function listPayload() {
+    return { ...build(), tests: testRuns() };
+  }
+
   function send(sub, payload, json) {
     if (sub.last === json) return;
     sub.last = json;
@@ -419,22 +427,22 @@ export function createListWatcher({ root, now = () => Math.floor(Date.now() / 10
 
   function tick() {
     if (Date.now() - lastScan >= rescanMs) rescan();
-    const payload = build();
+    const payload = listPayload();
     const json = JSON.stringify(payload);
     for (const sub of subs) send(sub, payload, json);
   }
 
   return {
     root: realRoot,
-    /** The current list; rescans the tree when the last scan is older than maxScanAgeMs. */
-    snapshot({ maxScanAgeMs = REQUEST_SCAN_AGE_MS } = {}) {
+    /** The current list; rescans the tree when the last scan is older than maxScanAgeMs. `tests` adds the queue. */
+    snapshot({ maxScanAgeMs = REQUEST_SCAN_AGE_MS, tests = false } = {}) {
       if (Date.now() - lastScan > maxScanAgeMs) rescan();
-      return { ...build(), serverTime: now() };
+      return { ...(tests ? listPayload() : build()), serverTime: now() };
     },
     subscribe(fn) {
       const sub = { fn, last: null };
       subs.add(sub);
-      const payload = build();
+      const payload = listPayload();
       send(sub, payload, JSON.stringify(payload));
       if (!timer) timer = setInterval(tick, tickMs);
       return () => {
@@ -703,8 +711,9 @@ export async function startDashboard({
   pickPort = randomPort, discoveryFile: discFile = discoveryFile(), host = "127.0.0.1",
   now, tickMs = 1000, rescanMs, isAlive, reveal = revealFolder, catalogs: injectedCatalogs, catalogCaches = {},
   latestVersion = fetchLatestVersion, updateCache = updateCachePath(), streamBacklogMax = STREAM_BACKLOG_MAX,
+  testSlot = testSlotPaths(), testRuns = () => readTestRuns({ paths: testSlot }),
 } = {}) {
-  const watcher = createListWatcher({ root, now, tickMs, rescanMs, isAlive });
+  const watcher = createListWatcher({ root, now, tickMs, rescanMs, isAlive, testRuns });
   const token = keepToken ? keptToken(tokenFile) : crypto.randomBytes(32).toString("hex");
   const tokenBuf = Buffer.from(token);
   const streams = new Set();
@@ -848,6 +857,8 @@ export async function startDashboard({
       reviewerNames: REVIEWER_NAMES,
       defaultReviewer: DEFAULT_REVIEWER,
       errors,
+      // machine-wide test queue defaults (agent-rules test-slot), not part of config.json
+      testSlot: { ...readTestSlotConf(testSlot), path: tildePath(testSlot.conf) },
     };
   }
 
@@ -1127,6 +1138,14 @@ export async function startDashboard({
           return fail(res, 400, e.message);
         }
       }
+      if (route === "/api/test-slot") {
+        try {
+          return json(res, 200, await saveTestSlotKey(body && body.key, body && body.value, testSlot));
+        } catch (e) {
+          if (e instanceof TestSlotError) return fail(res, e.status, e.message);
+          throw e;
+        }
+      }
       if (route === "/api/reveal") {
         const dir = body && watcher.resolve(body.ws, body.id);
         if (!dir) return fail(res, 404, "no such session");
@@ -1177,7 +1196,7 @@ export async function startDashboard({
         return json(res, 200, { root: p.root, rootDisplay: p.rootDisplay, depth: p.depth, version: p.version, workspaces: p.workspaces });
       }
       case "/api/sessions":
-        return json(res, 200, watcher.snapshot());
+        return json(res, 200, watcher.snapshot({ tests: true }));
       case "/api/session": {
         const ws = url.searchParams.get("ws");
         const dir = watcher.resolve(ws, url.searchParams.get("id"));

@@ -50,6 +50,7 @@ process.exit(2);
 `);
   process.env.PATH = `${bin}${path.delimiter}${process.env.PATH}`;
   process.env.HOME = path.join(tmp, "home");
+  delete process.env.CROSS_REVIEW_AGENTS_DIR; // test-slot under the temporary HOME, never this machine's
   // os.homedir() reads USERPROFILE on Windows
   process.env.USERPROFILE = process.env.HOME;
   fs.mkdirSync(process.env.HOME);

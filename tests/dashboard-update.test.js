@@ -22,6 +22,7 @@ before(() => {
   tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "dashboard-update-")));
   // Settings live under HOME: never the real one
   process.env.HOME = path.join(tmp, "home");
+  delete process.env.CROSS_REVIEW_AGENTS_DIR; // test-slot under the temporary HOME, never this machine's
   // os.homedir() reads USERPROFILE on Windows
   process.env.USERPROFILE = process.env.HOME;
   fs.mkdirSync(process.env.HOME);

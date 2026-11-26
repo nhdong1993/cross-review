@@ -145,3 +145,14 @@ export function inheritedValue({ global, workspace, skill, key, reviewer = DEFAU
 export function preview(config) {
   return JSON.stringify(mergeForm(config, {}, []), null, 2);
 }
+
+/** The save banner once nothing is pending: every unresolved failure and every cleanup notice not yet shown, so a
+ *  failed edit never hides what must be cleaned up (or the other way round). {state, text}: state is saved, failed
+ *  (text shown after "Not saved: ") or warn. */
+export function saveBanner(failures, notices) {
+  const fail = [...new Set(failures)];
+  const note = [...new Set(notices)];
+  if (fail.length) return { state: "failed", text: [...fail, ...note].join(" ") };
+  if (note.length) return { state: "warn", text: note.join(" ") };
+  return { state: "saved", text: "" };
+}

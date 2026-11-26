@@ -6,7 +6,7 @@
 import { ic } from "./icons.js";
 import { esc, renderField, renderInline, renderMarkdown } from "./markdown.js";
 import { PAGE, applyPage, groupReads, mergeActivity, newFeed, onSnapshot, visible } from "./feed.js";
-import { OTHER, REVIEWERS, SKILLS, effectiveReviewer, effortOptions, hasNoEfforts, inheritedValue, mergeForm, modelOptions, resolveHere } from "./settings.js";
+import { OTHER, REVIEWERS, SKILLS, effectiveReviewer, effortOptions, hasNoEfforts, inheritedValue, mergeForm, modelOptions, resolveHere, saveBanner } from "./settings.js";
 
 const $ = sel => document.querySelector(sel);
 /** Escaped text with `code` spans, as titles quote file names that way. */
@@ -40,6 +40,7 @@ export function parseRoute(hash) {
     }
   }
   if (parts[0] === "plans" && parts.length === 1) return { view: "plans" };
+  if (parts[0] === "tests" && parts.length === 1) return { view: "tests" };
   if (parts[0] === "p") {
     // a plan: #/p/<ws>/<file>, or its Plan tab with /plan; anything else under p goes to the list
     if ((parts.length === 3 || (parts.length === 4 && parts[3] === "plan")) && parts[1] && parts[2]) {
@@ -75,7 +76,7 @@ function route() {
   const same = r.view === "detail" && view && view.ws === r.ws && view.id === r.id;
   document.querySelectorAll(".view").forEach(v => v.classList.toggle("on", v.id === r.view));
   // a session's page lights the Sessions tab; a plan's page the Plans tab
-  const tab = r.view === "settings" ? "settings" : r.view === "plans" || r.view === "plan" ? "plans" : "sessions";
+  const tab = r.view === "settings" ? "settings" : r.view === "tests" ? "tests" : r.view === "plans" || r.view === "plan" ? "plans" : "sessions";
   document.querySelectorAll(".top nav a").forEach(a => a.classList.toggle("on", a.dataset.nav === tab));
   if (r.view === "detail") {
     if (same) {
@@ -100,6 +101,9 @@ function route() {
     list();
   } else if (r.view === "plans") {
     if (data) renderPlans();
+    list();
+  } else if (r.view === "tests") {
+    if (data) renderTests();
     list();
   }
   else connect(null);
@@ -330,8 +334,33 @@ function filteredHistory() {
 
 const renderHistory = () => fitPage(hist, filteredHistory());
 
+/** A test-slot run: Waited stops at the moment it got the slot; only the cells that still count carry data-since. */
+function testRow(r) {
+  const running = r.state === "running";
+  const where = r.repo ? `${r.repo} · ${r.worktree}` : r.worktree;
+  const step = r.step ? [r.step.program, r.step.script].filter(Boolean).join(" ") : "";
+  const line2 = [where, step].filter(Boolean).join(" · ");
+  const waited = running
+    ? `<td class="num mono">${clock(Math.max(0, r.runningAt - r.queuedAt))}</td>`
+    : `<td class="num mono" data-since="${Number(r.queuedAt) || 0}">${clock(nowS() - r.queuedAt)}</td>`;
+  const ran = running ? `<td class="num mono" data-since="${Number(r.runningAt) || 0}">${clock(nowS() - r.runningAt)}</td>` : `<td class="num soft">—</td>`;
+  return `<tr><td>${st(running ? "running" : "waiting", running ? "running" : "waiting")}</td>
+    <td class="run">${esc(r.label)}${line2 ? `<div class="line2">${esc(line2)}</div>` : ""}</td>${waited}${ran}</tr>`;
+}
+
+/** The Tests tab: its link shows only where test-slot is set up (run/test-slot.d), so the page is the same as
+ *  before for everyone else; opened directly without it, the tab says so. */
+function renderTests() {
+  const t = data.tests || { available: false };
+  $('.top nav a[data-nav="tests"]').hidden = t.available !== true;
+  const empty = text => `<tr class="empty"><td colspan="4"><div class="empty-state">${text}</div></td></tr>`;
+  $("#test-runs").innerHTML = !t.available ? empty("test-slot is not set up on this computer (no ~/.agents/run/test-slot.d).")
+    : t.error ? empty("Test queue unreadable.") : t.runs.length ? t.runs.map(testRow).join("") : empty("No active (instrumented) test runs.");
+}
+
 function renderSessions() {
   $("#active").innerHTML = data.active.length ? data.active.map(activeRow).join("") : EMPTY_ACTIVE;
+  renderTests();
   renderFilters();
   renderHistory();
 }
@@ -1159,8 +1188,11 @@ async function openSettings(r) {
   }
   let s, a;
   for (;;) {
-    if (pendingSave) await pendingSave.catch(() => null);
+    // the count is taken before waiting, so a save started while this load waits makes it wait and ask again
     const saves = savesStarted;
+    if (pendingSave) await pendingSave.catch(() => null);
+    await tsChain;
+    if (saves !== savesStarted) continue;
     [s, a] = await Promise.all([getJson("/api/settings"), getJson("/api/avatars")]);
     // a newer Settings page was opened meanwhile, or the user left Settings
     if (load !== settingsLoad || !onSettings()) return;
@@ -1331,6 +1363,7 @@ function renderSettings() {
   $("#preview").textContent = JSON.stringify(mergeForm(savedConfig(), sv.draft, sv.touched), null, 2);
   $("#avatars-block").classList.toggle("on", !workspace);
   $("#updates-block").classList.toggle("on", !workspace);
+  renderTesting(workspace);
   $("#f-updates").checked = !workspace && d.check_updates === true;
   renderUpdate();
   renderAvatarTable();
@@ -1381,8 +1414,58 @@ async function uploadAvatar(input) {
 
 // ----- events -----
 
+// ---------- Testing (test-slot defaults; global only, saved one key at a time) ----------
+
+const TS_FIELDS = { "f-ts-jobs": "TEST_SLOT_JOBS", "f-ts-wait": "TEST_SLOT_WAIT", "f-ts-grace": "TEST_SLOT_KILL_GRACE" };
+let tsChain = Promise.resolve(); // never rejects: each save catches its own failure
+let tsPending = 0;
+const tsFailed = new Map(); // Testing key → why its last save failed, until a later save of that key works
+const tsNotices = []; // cleanup notices from saves that worked, kept until shown
+
+function renderTesting(workspace) {
+  const t = settings.testSlot || { available: false };
+  $("#testing-block").classList.toggle("on", !workspace && t.available === true);
+  if (!t.available) return;
+  $("#ts-path").textContent = t.path || "";
+  for (const id of Object.keys(TS_FIELDS)) $(`#${id}`).disabled = !!t.error;
+  if (t.error) {
+    $("#ts-invalid").textContent = "The test-slot settings could not be read, so they cannot be shown or changed here.";
+    return;
+  }
+  for (const [id, key] of Object.entries(TS_FIELDS)) if (document.activeElement !== $(`#${id}`)) $(`#${id}`).value = t.values[key];
+  $("#ts-invalid").textContent = t.invalid ? "The file has lines test-slot ignores; saving rewrites only the field you change." : "";
+}
+
+/** Saves go out one after another, so two quick edits cannot overwrite each other. A failed save stays reported
+ *  until that field saves; "Saved" shows only when nothing is pending and nothing failed. */
+function saveTesting(input) {
+  const key = TS_FIELDS[input.id];
+  const value = input.value.trim();
+  savesStarted++; // a settings load already in flight is asked again
+  tsPending++;
+  showSaveState("saving");
+  tsChain = tsChain.then(async () => {
+    try {
+      const res = await fetch("/api/test-slot", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key, value }) });
+      const answer = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(answer.error || "the Testing setting could not be saved.");
+      if (!answer.values) throw new Error("the Testing setting could not be confirmed.");
+      tsFailed.delete(key);
+      if (answer.warning) tsNotices.push(answer.warning);
+      settings.testSlot = { ...settings.testSlot, ...answer };
+    } catch (e) {
+      tsFailed.set(key, e instanceof TypeError ? "the Testing setting could not be saved." : e.message);
+    } finally {
+      tsPending--;
+    }
+    settleSaveState();
+    if (!tsPending && onSettings()) renderSettings();
+  });
+}
+
 function onSettingsChange(e) {
   const t = e.target;
+  if (Object.hasOwn(TS_FIELDS, t.id)) return saveTesting(t);
   if (t.name === "scope") {
     location.hash = t.value === "global" ? "#/settings" : `#/settings/${encodeURIComponent($("#ws").value)}`;
     return;
@@ -1510,8 +1593,16 @@ async function drainSaves() {
   } finally {
     pendingSave = null;
   }
-  const failed = [...saveFailed.values()][0];
-  showSaveState(failed ? "failed" : "saved", failed);
+  settleSaveState();
+}
+
+/** The banner once nothing is being saved, from both queues (settings files and Testing): Saved only when no save
+ *  of either kind has a failure left. */
+function settleSaveState() {
+  if (pendingSave || tsPending) return;
+  const { state, text } = saveBanner([...saveFailed.values(), ...tsFailed.values()], tsNotices);
+  tsNotices.length = 0; // shown now
+  showSaveState(state, text);
 }
 
 /** Send one save; the answer updates the level it was sent for, and resets the form only when it still shows exactly what was sent. */
@@ -1545,7 +1636,7 @@ function showSaveState(state, why) {
   const el = $("#save-state");
   clearTimeout(saveStateTimer);
   el.className = `save-state on ${state}`;
-  el.innerHTML = state === "saving" ? "Saving…" : state === "saved" ? `${ic("done")}Saved` : `Not saved: ${esc(why)}`;
+  el.innerHTML = state === "saving" ? "Saving…" : state === "saved" ? `${ic("done")}Saved` : state === "warn" ? esc(why) : `Not saved: ${esc(why)}`;
   if (state === "saved") saveStateTimer = setTimeout(() => el.classList.remove("on"), 2500);
 }
 

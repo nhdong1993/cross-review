@@ -17,6 +17,7 @@ import { findChrome, launchChrome } from "./helpers/chrome.js";
 import { startDashboard } from "../skill-packs/cross-review/scripts/lib/dashboard/server.js";
 import { GITIGNORE } from "../skill-packs/cross-review/scripts/lib/config.js";
 import { parsePlan } from "../skill-packs/cross-review/scripts/lib/plans.js";
+import { readTestRuns, testSlotPaths } from "../skill-packs/cross-review/scripts/lib/dashboard/test-slot.js";
 
 /** A saved settings file with Codex's fields (written under reviewers.codex) read at the top level. */
 const savedCodex = file => {
@@ -36,6 +37,7 @@ const root = path.join(tmp, "root");
 const fx = buildFixture(root, { now: Math.floor(Date.now() / 1000), livePid: process.pid });
 // Settings and avatars live under HOME: never the real one
 process.env.HOME = path.join(tmp, "home");
+delete process.env.CROSS_REVIEW_AGENTS_DIR; // test-slot under the temporary HOME, never this machine's
 // os.homedir() reads USERPROFILE on Windows
 process.env.USERPROFILE = process.env.HOME;
 fs.mkdirSync(process.env.HOME);
@@ -109,7 +111,7 @@ try {
     icon: document.querySelector("link[rel=icon]")?.getAttribute("href"),
     foot: document.querySelector(".site-foot").textContent.replace(/\\s+/g, " ").trim(),
     links: [...document.querySelectorAll(".site-foot a")].map(a => [a.textContent, a.href, a.target, a.rel]),
-    nav: [...document.querySelectorAll(".top nav a")].map(a => ({ nav: a.dataset.nav, svg: !!a.querySelector("svg"), on: a.classList.contains("on") })),
+    nav: [...document.querySelectorAll(".top nav a:not([hidden])")].map(a => ({ nav: a.dataset.nav, svg: !!a.querySelector("svg"), on: a.classList.contains("on") })),
     where: document.getElementById("where").textContent,
     active: [...document.querySelectorAll("#active tr")].map(tr => ({
       st: !!tr.querySelector(".st svg"), skill: !!tr.querySelector(".skill svg"), warn: !!tr.querySelector(".warn"),
@@ -840,6 +842,7 @@ try {
   await lateCatalogChecks(browser);
 
   await plansChecks(browser);
+  await testSlotChecks(browser);
 
   console.log(`dashboard-ui: ok (${dom.active.length} in progress, ${dom.history} of ${sessions.history.length} in history on the first page)`);
   console.log(`screenshots: ${shots}`);
@@ -1352,5 +1355,122 @@ async function plansChecks(browser) {
     assert.equal(await p.evaluate(`document.querySelector("#plan-list .empty").textContent.trim()`), "No plans yet. loop-plan writes them to .cross-review/plans/.");
   } finally {
     await d7.close();
+  }
+}
+
+// ---------- Tests on this machine and Testing (dashboard-test-slot plan) ----------
+
+async function testSlotChecks(browser) {
+  const tsRoot = path.join(tmp, "ts-root");
+  fs.mkdirSync(path.join(tsRoot, "quarry", ".cross-review", "sessions"), { recursive: true });
+  const install = name => {
+    const p = testSlotPaths({ CROSS_REVIEW_AGENTS_DIR: path.join(tmp, name) });
+    fs.mkdirSync(p.dir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(p.lock, "");
+    return p;
+  };
+  const p = install("agents");
+  const now = Math.floor(Date.now() / 1000);
+  const rec = r => fs.writeFileSync(path.join(p.dir, `${r.pid}.json`), JSON.stringify({ v: 1, pstart: "A", ...r }));
+  rec({ pid: 1001, state: "running", queued_at: now - 30, running_at: now - 10, payload: 1003, label: "cargo test", repo: "app", worktree: "feature" });
+  rec({ pid: 1002, state: "waiting", queued_at: now - 5, label: "vitest", repo: "", worktree: "scratch" });
+  const rows = [{ pid: 1001, ppid: 1, lstart: "A" }, { pid: 1002, ppid: 1, lstart: "A" }, { pid: 1003, ppid: 1001, lstart: "x" }, { pid: 1004, ppid: 1002, lstart: "x" }];
+  const testRuns = () => readTestRuns({ paths: p, processRows: () => rows, step: () => ({ program: "node", script: "./stage.mjs" }) });
+  const d = await startDashboard({ root: tsRoot, port: 0, open: false, discoveryFile: null, catalogs, tickMs: 300, testSlot: p, testRuns });
+  const cells = `[...document.querySelectorAll("#test-runs tr")].map(tr => [...tr.cells].map(c => c.textContent.trim()))`;
+  try {
+    const page = await browser.newPage(1400, 1000);
+    await page.goto(`${d.url}#/`);
+    // its own tab, shown because test-slot is set up; nothing about tests on Sessions
+    await page.waitFor(`!document.querySelector('.top nav a[data-nav="tests"]').hidden`);
+    assert.equal(await page.evaluate(`document.querySelector("#sessions").textContent.includes("Tests on this machine")`), false);
+    await page.evaluate(`document.querySelector('.top nav a[data-nav="tests"]').click()`);
+    await page.waitFor(`location.hash === "#/tests" && document.getElementById("tests").classList.contains("on") && document.querySelector('.top nav a[data-nav="tests"]').classList.contains("on") && document.querySelectorAll("#test-runs tr").length === 2`);
+    let t = await page.evaluate(cells);
+    assert.equal(t[0][0], "running");
+    assert.equal(t[0][1], "cargo testapp · feature · node ./stage.mjs");
+    assert.equal(t[0][2], "0:20", "waited: frozen at running_at − queued_at");
+    assert.equal(t[1][0], "waiting");
+    assert.equal(t[1][1], "vitestscratch");
+    assert.equal(t[1][3], "—");
+    assert.equal(await page.evaluate(`document.querySelector("#test-runs tr").cells[2].hasAttribute("data-since")`), false);
+    await page.screenshot(path.join(shots, "tests-tab-1400.png"));
+    const phone = await browser.newPage(390, 844);
+    await phone.goto(`${d.url}#/tests`);
+    await phone.waitFor(`document.querySelectorAll("#test-runs tr").length === 2`);
+    const wide = await phone.evaluate(`(() => { const r = {}; r.w = innerWidth; r.page = document.documentElement.scrollWidth; r.table = document.querySelector("#tests table").getBoundingClientRect().right; r.nav = document.querySelector(".top nav").getBoundingClientRect().right; const l = document.querySelector('.top nav a[data-nav="tests"]'); l.hidden = true; r.pageNoTab = document.documentElement.scrollWidth; l.hidden = false; return r; })()`);
+    assert.ok(wide.table <= wide.w + 1, `the Tests table fits a phone: ${JSON.stringify(wide)}`);
+    // every tab, Tests and Settings included, is on screen (icons only on a phone, the label stays its name)
+    const tabs = await phone.evaluate(`[...document.querySelectorAll(".top nav a:not([hidden])")].map(a => ({ nav: a.dataset.nav, right: a.getBoundingClientRect().right, name: a.textContent.trim() }))`);
+    assert.deepEqual(tabs.map(t => t.nav), ["sessions", "plans", "tests", "settings"]);
+    for (const t of tabs) assert.ok(t.right <= 390, `${t.nav} tab off screen at ${t.right}px`);
+    assert.equal(tabs[2].name, "Tests");
+    await phone.screenshot(path.join(shots, "tests-tab-390.png"));
+    // the holder finishes and the waiter gets the slot: Waited stops, Running counts on
+    fs.rmSync(path.join(p.dir, "1001.json"));
+    rec({ pid: 1002, state: "running", queued_at: now - 5, running_at: now - 1, payload: 1004, label: "vitest", repo: "", worktree: "scratch" });
+    await page.waitFor(`document.querySelectorAll("#test-runs tr").length === 1 && document.querySelector("#test-runs tr").cells[0].textContent.trim() === "running"`);
+    const first = await page.evaluate(cells);
+    await new Promise(r => setTimeout(r, 2200));
+    const later = await page.evaluate(cells);
+    assert.equal(later[0][2], first[0][2], "Waited is frozen once running");
+    assert.equal(first[0][2], "0:04");
+    assert.notEqual(later[0][3], first[0][3], "Running advances");
+    // nothing running
+    fs.rmSync(path.join(p.dir, "1002.json"));
+    await page.waitFor(`document.querySelector("#test-runs .empty-state") && document.querySelector("#test-runs .empty-state").textContent === "No active (instrumented) test runs."`);
+
+    // Testing: global only, one key per save into test-slot.conf
+    await page.goto(`${d.url}#/settings`);
+    await page.waitFor(`document.getElementById("testing-block").classList.contains("on") && document.getElementById("f-ts-jobs").value === "2"`);
+    assert.equal(await page.evaluate(`document.getElementById("f-ts-wait").value`), "100");
+    assert.equal(await page.evaluate(`document.getElementById("f-ts-grace").value`), "10");
+    const set = (id, v) => page.evaluate(`(() => { const i = document.getElementById(${JSON.stringify(id)}); i.value = ${JSON.stringify(v)}; i.dispatchEvent(new Event("change", { bubbles: true })); })()`);
+    await set("f-ts-jobs", "4");
+    await set("f-ts-grace", "3");
+    await page.waitFor(SAVED);
+    await page.waitFor(`document.getElementById("f-ts-grace").value === "3"`);
+    assert.equal(fs.readFileSync(p.conf, "utf8"), "TEST_SLOT_JOBS=4\nTEST_SLOT_KILL_GRACE=3\n");
+    await page.screenshot(path.join(shots, "settings-testing-1400.png"));
+    await set("f-ts-jobs", "0");
+    await page.waitFor(`/Not saved: Workers must be a whole number from 1/.test(document.getElementById("save-state").textContent)`);
+    assert.equal(fs.readFileSync(p.conf, "utf8"), "TEST_SLOT_JOBS=4\nTEST_SLOT_KILL_GRACE=3\n");
+    // a later save of another field does not hide that Workers was not saved; saving Workers clears it
+    await set("f-ts-grace", "5");
+    for (let i = 0; i < 100 && !/TEST_SLOT_KILL_GRACE=5/.test(fs.readFileSync(p.conf, "utf8")); i++) await new Promise(r => setTimeout(r, 50));
+    await page.waitFor(`!/Saving/.test(document.getElementById("save-state").textContent)`);
+    assert.match(fs.readFileSync(p.conf, "utf8"), /TEST_SLOT_KILL_GRACE=5/);
+    assert.match(await page.evaluate(`document.getElementById("save-state").textContent`), /Not saved: Workers must be a whole number from 1/);
+    // nor does a settings-file save that works meanwhile
+    await page.evaluate(`(() => { const f = document.getElementById("f-follow"); f.value = "on"; f.dispatchEvent(new Event("change", { bubbles: true })); })()`);
+    for (let i = 0; i < 100 && !fs.existsSync(path.join(process.env.HOME, ".cross-review", "config.json")); i++) await new Promise(r => setTimeout(r, 50));
+    await page.waitFor(`!/Saving/.test(document.getElementById("save-state").textContent)`);
+    assert.match(await page.evaluate(`document.getElementById("save-state").textContent`), /Not saved: Workers must be a whole number from 1/);
+    await set("f-ts-jobs", "6");
+    await page.waitFor(SAVED);
+    assert.equal(fs.readFileSync(p.conf, "utf8"), "TEST_SLOT_JOBS=6\nTEST_SLOT_KILL_GRACE=5\n");
+    await page.evaluate(`location.hash = "#/settings/quarry"`);
+    await page.waitFor(`document.getElementById("preview-title").textContent === "Show quarry/.cross-review/config.json"`);
+    assert.equal(await page.evaluate(`document.getElementById("testing-block").classList.contains("on")`), false, "no Testing per workspace");
+  } finally {
+    await d.close();
+  }
+
+  // not set up: no panel, no Testing
+  const bare = testSlotPaths({ CROSS_REVIEW_AGENTS_DIR: path.join(tmp, "no-agents") });
+  const d2 = await startDashboard({ root: tsRoot, port: 0, open: false, discoveryFile: null, catalogs, testSlot: bare });
+  try {
+    const page = await browser.newPage(1400, 900);
+    await page.goto(`${d2.url}#/`);
+    await page.waitFor(`document.querySelectorAll("#active tr").length > 0`);
+    assert.equal(await page.evaluate(`document.querySelector('.top nav a[data-nav="tests"]').hidden`), true, "no Tests tab");
+    assert.equal(await page.evaluate(`getComputedStyle(document.querySelector('.top nav a[data-nav="tests"]')).display`), "none");
+    await page.goto(`${d2.url}#/tests`);
+    await page.waitFor(`/not set up on this computer/.test(document.getElementById("test-runs").textContent)`);
+    await page.goto(`${d2.url}#/settings`);
+    await page.waitFor(`document.getElementById("updates-block").classList.contains("on")`);
+    assert.equal(await page.evaluate(`document.getElementById("testing-block").classList.contains("on")`), false);
+  } finally {
+    await d2.close();
   }
 }
