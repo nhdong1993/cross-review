@@ -109,6 +109,16 @@ test("a finalized session with a plain REVISE and no convergence reads as stoppe
   assert.deepEqual([classify(readSession(dir), { now: fx.now }).summary.state], ["stopped"]);
 });
 
+test("a caller without a title gets a known client's name: Antigravity sends none", () => {
+  const dir = writeSession(path.join(tmp, "extra", ".cross-review", "sessions"), "review-impl-20261010-004", {
+    skill: "review-impl", created: fx.now, state: { caller: { name: "antigravity-client", version: "v1.0.0" } },
+    rounds: [{ status: "completed", started: fx.now, elapsed: 1, review: "### VERDICT\n- Status: APPROVE\n" }],
+  });
+  const { summary, detail } = classify(readSession(dir), { now: fx.now });
+  assert.deepEqual(summary.caller, { name: "antigravity-client", title: "Antigravity" });
+  assert.deepEqual(detail.facts.caller, { name: "antigravity-client", title: "Antigravity" });
+});
+
 // ---------- 3: titles ----------
 
 test("titles come from each skill's input, cut at 120 characters on a word", () => {

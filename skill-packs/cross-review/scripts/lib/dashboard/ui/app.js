@@ -700,7 +700,7 @@ function onPlanClick(e) {
 const AVATAR = { rv: "avatars/reviewer.png", ag: "avatars/agent.png", us: "avatars/you.png" };
 const NAME = { rv: "Reviewer", ag: "Agent", us: "You" };
 const REVIEWER_LETTERS = { codex: "CX", claude: "CC", agy: "AG", grok: "GK" };
-const CALLER_LETTERS = { "claude-code": "CC", "codex-mcp-client": "CX" };
+const CALLER_LETTERS = { "claude-code": "CC", "codex-mcp-client": "CX", "antigravity-client": "AG" };
 /** table[key] for the table's own keys only: names from session data can be "constructor" or "__proto__". */
 const own = (table, key) => (Object.hasOwn(table, key) ? table[key] : undefined);
 

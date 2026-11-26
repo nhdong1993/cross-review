@@ -592,6 +592,17 @@ const effortUsed = state => (Object.hasOwn(state, "effort_applied") ? state.effo
 // recorded: the effort above is what the runner passed, so the page shows it as is (null: none)
 const effortRecorded = state => Object.hasOwn(state, "effort_applied");
 
+// MCP clients that send no clientInfo title (seen in stored sessions): Antigravity's is {name: "antigravity-client", version}
+const CALLER_TITLES = { "antigravity-client": "Antigravity" };
+
+/** The session's caller as {name, title}; a known client without a title gets its name. */
+function callerOf(state) {
+  const c = state.caller;
+  if (!c || !c.name) return null;
+  const name = String(c.name);
+  return { name, title: c.title ? String(c.title) : Object.hasOwn(CALLER_TITLES, name) ? CALLER_TITLES[name] : null };
+}
+
 export function classify(parsed, { now = Math.floor(Date.now() / 1000), isAlive = () => false } = {}) {
   const { state, peer } = parsed;
   const rounds = effectiveRounds(parsed, { isAlive });
@@ -646,7 +657,7 @@ export function classify(parsed, { now = Math.floor(Date.now() / 1000), isAlive 
     effort: effortUsed(state),
     effortRecorded: effortRecorded(state),
     reviewer: state.reviewer || "codex",
-    caller: state.caller && state.caller.name ? { name: String(state.caller.name), title: state.caller.title ? String(state.caller.title) : null } : null,
+    caller: callerOf(state),
     reviewerSeconds,
     running: cls.state === "running",
     createdAt: state.created_at || null,
@@ -693,7 +704,7 @@ export function classify(parsed, { now = Math.floor(Date.now() / 1000), isAlive 
       effort: effortUsed(state),
       effortRecorded: effortRecorded(state),
       sources: state.settings_sources || null,
-      caller: state.caller || null,
+      caller: callerOf(state),
       reviewerSeconds,
       startedAt: state.created_at || null,
       runningSince: cls.state === "running" ? last.startedAt : null,
