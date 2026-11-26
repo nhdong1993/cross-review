@@ -4,6 +4,8 @@
 // records, and writes one file: <agents>/test-slot.conf, the queue's saved defaults.
 //
 //   testSlotPaths() → {root, dir, lock, conf}        readTestRuns() → {available, error?, runs}
+//   readTests() → readTestRuns() plus what agent-rules' observer (bin/test-slot-usage) measured: usage of the
+//                 running run, estimates for waiters, machine figures, the shadow decision and recent history
 //   readTestSlotConf() → {available, values, saved, invalid}    saveTestSlotKey(key, value) → readTestSlotConf()
 
 import crypto from "node:crypto";
@@ -284,18 +286,18 @@ export async function saveTestSlotKey(key, value, p = testSlotPaths()) {
 
 // ---- runs ----
 
-/** Every process as {pid, ppid, lstart}, or null when ps fails. One call per snapshot, without arguments. */
+/** Every process as {pid, ppid, stat, lstart}, or null when ps fails. One call per snapshot, without arguments. */
 export function psRows() {
   let out;
   try {
-    out = execFileSync("/bin/ps", ["-A", "-o", "pid=,ppid=,lstart="], { env: { ...process.env, LC_ALL: "C", TZ: "UTC" }, encoding: "utf8", timeout: 5000, maxBuffer: 16 << 20, stdio: ["ignore", "pipe", "ignore"] });
+    out = execFileSync("/bin/ps", ["-A", "-o", "pid=,ppid=,stat=,lstart="], { env: { ...process.env, LC_ALL: "C", TZ: "UTC" }, encoding: "utf8", timeout: 5000, maxBuffer: 16 << 20, stdio: ["ignore", "pipe", "ignore"] });
   } catch {
     return null;
   }
   const rows = [];
   for (const line of out.split("\n")) {
-    const m = /^\s*(\d+)\s+(\d+)\s+(.*\S)\s*$/.exec(line);
-    if (m) rows.push({ pid: Number(m[1]), ppid: Number(m[2]), lstart: m[3].replace(/\s+/g, " ") });
+    const m = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*\S)\s*$/.exec(line);
+    if (m) rows.push({ pid: Number(m[1]), ppid: Number(m[2]), stat: m[3], lstart: m[4].replace(/\s+/g, " ") });
   }
   return rows;
 }
@@ -430,3 +432,137 @@ export function readTestRuns({ paths = testSlotPaths(), processRows = psRows, st
   runs.sort((a, b) => (a.state === b.state ? a.queuedAt - b.queuedAt || a.pid - b.pid : a.state === "running" ? -1 : 1));
   return { available: true, runs };
 }
+
+// ---- observation: what agent-rules' observer measured (read-only; the dashboard never measures or decides) ----
+
+const FRESH_S = 15; // three sample intervals
+const AHEAD_S = 5; // tolerance for a sample stamped slightly ahead of this clock
+const HISTORY_LIMIT = 2 * 1024 * 1024; // larger than the observer ever writes: unknown, never read in part
+const HISTORY_ROWS = 20;
+const EST_STATES = new Set(["measured", "unmeasured", "overrun", "unknown"]);
+const n0 = x => (typeof x === "number" && Number.isFinite(x) && x >= 0 ? x : null);
+const startOf = s => String(s).replace(/\s+/g, " ").trim();
+const runRoot = paths => path.dirname(paths.dir);
+
+/** The observer's file in one of three states: {state: "fresh", doc}, {state: "expired"} (the right observer, an
+ *  old sample) or {state: "unusable"} (missing, malformed, stamped in the future, or not the process it names).
+ *  `rows` are this snapshot's process rows when it has any (some record exists); without them age alone decides,
+ *  so an idle dashboard starts no ps for this. */
+export function readObserver(paths, now, rows, readFile = fs.readFileSync) {
+  let doc;
+  try {
+    doc = JSON.parse(readFile(path.join(runRoot(paths), "test-slot.observer.json"), "utf8"));
+  } catch {
+    return { state: "unusable" };
+  }
+  if (!doc || doc.v !== 1 || n0(doc.at) === null || !Number.isInteger(doc.pid) || typeof doc.pstart !== "string") return { state: "unusable" };
+  const age = now - doc.at;
+  if (age < -AHEAD_S) return { state: "unusable" };
+  if (rows) {
+    const row = rows.find(r => r.pid === doc.pid);
+    if (!row || startOf(row.lstart) !== startOf(doc.pstart)) return { state: "unusable" };
+  }
+  return age > FRESH_S ? { state: "expired" } : { state: "fresh", doc };
+}
+
+let historyCache = null; // {file, size, mtimeMs, rows}
+
+/** The newest finished runs, newest first, as the page shows them; [] without a history, null when it cannot be
+ *  read whole. The parsed result is kept while the file's size and mtime stay the same. */
+export function readHistory(paths, readFile = fs.readFileSync) {
+  const file = path.join(runRoot(paths), "test-slot.history.jsonl");
+  let st;
+  try {
+    st = fs.statSync(file);
+  } catch (e) {
+    return e.code === "ENOENT" ? [] : null;
+  }
+  if (!st.isFile() || st.size > HISTORY_LIMIT) return null;
+  if (historyCache && historyCache.file === file && historyCache.size === st.size && historyCache.mtimeMs === st.mtimeMs) return historyCache.rows;
+  let text;
+  try {
+    text = readFile(file, "utf8");
+  } catch {
+    return null;
+  }
+  const rows = [];
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    let l;
+    try {
+      l = JSON.parse(line);
+    } catch {
+      continue; // a torn last line
+    }
+    if (!l || l.v !== 1 || l.snapshot === true || n0(l.ended_at) === null) continue;
+    const peak = l.peak && typeof l.peak === "object" ? l.peak : {};
+    rows.push({
+      endedAt: l.ended_at, repo: str(l.repo), worktree: str(l.worktree), label: str(l.label) || "custom",
+      waitS: n0(l.wait_s), durS: n0(l.dur_s), exit: Number.isInteger(l.exit) ? l.exit : null,
+      peakMemMb: n0(peak.mem_mb), peakCpuPct: n0(peak.cpu_pct), memLow: peak.mem_low === true, estMb: n0(l.est_mb),
+      partial: l.partial === true, heads: n0(l.heads_total), headsPassed: n0(l.heads_passed), headsExact: l.heads_exact !== false,
+    });
+  }
+  // stable: runs that ended in the same second keep the order the observer wrote them in
+  const out = rows.map((r, i) => [r, i]).sort((a, b) => b[0].endedAt - a[0].endedAt || b[1] - a[1]).slice(0, HISTORY_ROWS).map(x => x[0]);
+  historyCache = { file, size: st.size, mtimeMs: st.mtimeMs, rows: out };
+  return out;
+}
+
+const tree = t => (t && typeof t === "object" ? { n: n0(t.n), cpuPct: n0(t.cpu_pct), memMb: n0(t.mem_mb), rssMb: n0(t.rss_mb), memLow: t.mem_low === true } : null);
+
+/** readTestRuns plus the observer's figures. One validity decision for the sample governs every live field; a
+ *  shadow decision is attached only to the pair it was computed for. History does not depend on any of it. */
+export function readTests({ paths = testSlotPaths(), processRows = psRows, step = readStep, now = Math.floor(Date.now() / 1000), readFile = fs.readFileSync } = {}) {
+  let rows; // set only when readTestRuns needed the process table: an empty queue costs no ps
+  const out = readTestRuns({ paths, processRows: () => (rows = processRows()), step });
+  if (!out.available) return out;
+  const history = readHistory(paths, readFile);
+  if (out.error) return { ...out, observer: "absent", host: null, vm: null, history };
+  const byPid = new Map((rows || []).map(r => [r.pid, r]));
+  for (const r of out.runs) {
+    const stat = String((byPid.get(r.pid) || {}).stat || "");
+    if (stat.startsWith("Z")) r.exited = true;
+    else if (stat.startsWith("T")) r.stopped = true;
+    if (r.state === "running") r.usage = null;
+    else r.est = null;
+  }
+  const o = readObserver(paths, now, out.runs.length ? rows : null, readFile);
+  if (o.state !== "fresh") {
+    if (o.state === "expired") for (const r of out.runs) if (r.state === "running" && !r.exited) r.usage = { stale: true };
+    return { ...out, observer: "absent", host: null, vm: null, history };
+  }
+  const d = o.doc;
+  const same = (e, r) => e && e.pid === r.pid && typeof e.pstart === "string" && startOf(e.pstart) === r.pstart;
+  // records carry the start time the dashboard matched against the process table
+  const recStart = new Map();
+  for (const r of out.runs) recStart.set(r.pid, startOf((byPid.get(r.pid) || {}).lstart || ""));
+  const mine = (list, r) => (Array.isArray(list) ? list : []).find(e => same(e, { pid: r.pid, pstart: recStart.get(r.pid) }));
+  for (const r of out.runs) {
+    if (r.state === "running") {
+      const e = r.exited ? null : mine(d.runs, r);
+      if (e) {
+        const p = e.peak && typeof e.peak === "object" ? e.peak : {};
+        r.usage = { at: d.at, tree: tree(e.tree), peak: { cpuPct: n0(p.cpu_pct), memMb: n0(p.mem_mb), samples: n0(p.samples), memLow: p.mem_low === true }, partial: e.partial === true };
+      }
+    } else {
+      const w = mine(d.waiters, r);
+      if (w && EST_STATES.has(w.est_state)) r.est = { state: w.est_state, mb: n0(w.est_mb), cores: n0(w.est_cores), seconds: n0(w.est_s), n: n0(w.est_n) };
+    }
+  }
+  const head = out.runs.find(r => r.state === "waiting" && !r.stopped && !r.exited);
+  const sh = d.shadow;
+  if (head && sh && typeof sh === "object" && same(sh, { pid: head.pid, pstart: recStart.get(head.pid) }) && typeof sh.reason === "string"
+    && out.runs.some(r => r.state === "running" && !r.exited && same(sh.incumbent, { pid: r.pid, pstart: recStart.get(r.pid) }))) {
+    head.shadow = { passed: sh.passed === true, reason: sh.reason };
+  }
+  const h = d.host && typeof d.host === "object" ? d.host : null;
+  const v = d.vm && typeof d.vm === "object" ? d.vm : null;
+  return {
+    ...out, observer: "running",
+    host: h && { ncpu: n0(h.ncpu), idleCores: n0(h.idle_cores), pressure: n0(h.pressure), availMb: n0(h.avail_mb), swapoutPagesS: n0(h.swapout_pages_s), swapinPagesS: n0(h.swapin_pages_s) },
+    vm: v && { n: n0(v.n), cpuPct: n0(v.cpu_pct), memMb: n0(v.mem_mb), memLow: v.mem_low === true },
+    history,
+  };
+}
+

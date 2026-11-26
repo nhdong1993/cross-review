@@ -28,7 +28,7 @@ import { fillCommits, gitPlanFacts, gitWatch, listPlans, parsePlan, planProgress
 import { DEFAULT_REVIEWER, REVIEWER_NAMES, getReviewer } from "../reviewers/index.js";
 import { mergeForm } from "./ui/settings.js";
 import { fetchLatestVersion, isNewer, readUpdateCache, UPDATE_TTL_S, updateCachePath, writeUpdateCache } from "./update.js";
-import { readTestRuns, readTestSlotConf, saveTestSlotKey, testSlotPaths, TestSlotError } from "./test-slot.js";
+import { readTests, readTestSlotConf, saveTestSlotKey, testSlotPaths, TestSlotError } from "./test-slot.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const UI_DIR = path.join(HERE, "ui");
@@ -125,7 +125,7 @@ const sessionFiles = dir => signatureParts(dir).filter(p => !ACTIVITY_FILE.test(
  * Subscribers get the full list on subscribe and again whenever it differs from what they
  * were last sent.
  */
-export function createListWatcher({ root, now = () => Math.floor(Date.now() / 1000), rescanMs = 10000, tickMs = 1000, gitMs = 600000, isAlive = pidAlive, depth = SCAN_DEPTH, testRuns = () => readTestRuns() } = {}) {
+export function createListWatcher({ root, now = () => Math.floor(Date.now() / 1000), rescanMs = 10000, tickMs = 1000, gitMs = 600000, isAlive = pidAlive, depth = SCAN_DEPTH, testRuns = () => readTests() } = {}) {
   const realRoot = fs.realpathSync(root);
   const version = packVersion();
   const scanned = new Map(); // ws key → absolute path
@@ -711,7 +711,7 @@ export async function startDashboard({
   pickPort = randomPort, discoveryFile: discFile = discoveryFile(), host = "127.0.0.1",
   now, tickMs = 1000, rescanMs, isAlive, reveal = revealFolder, catalogs: injectedCatalogs, catalogCaches = {},
   latestVersion = fetchLatestVersion, updateCache = updateCachePath(), streamBacklogMax = STREAM_BACKLOG_MAX,
-  testSlot = testSlotPaths(), testRuns = () => readTestRuns({ paths: testSlot }),
+  testSlot = testSlotPaths(), testRuns = () => readTests({ paths: testSlot }),
 } = {}) {
   const watcher = createListWatcher({ root, now, tickMs, rescanMs, isAlive, testRuns });
   const token = keepToken ? keptToken(tokenFile) : crypto.randomBytes(32).toString("hex");

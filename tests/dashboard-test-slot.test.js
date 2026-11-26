@@ -11,7 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { lockHolder, parseTestSlotConf, psRows, readStep, readTestRuns, readTestSlotConf, saveTestSlotKey, selectStep, stepCandidates, testSlotPaths, TEST_SLOT_DEFAULTS } from "../skill-packs/cross-review/scripts/lib/dashboard/test-slot.js";
+import { lockHolder, parseTestSlotConf, psRows, readHistory, readStep, readTestRuns, readTests, readTestSlotConf, saveTestSlotKey, selectStep, stepCandidates, testSlotPaths, TEST_SLOT_DEFAULTS } from "../skill-packs/cross-review/scripts/lib/dashboard/test-slot.js";
 import { startDashboard } from "../skill-packs/cross-review/scripts/lib/dashboard/server.js";
 import { saveBanner } from "../skill-packs/cross-review/scripts/lib/dashboard/ui/settings.js";
 
@@ -691,4 +691,214 @@ test("every dashboard fixture, demo and screenshot entry point drops an inherite
     // os.homedir() reads USERPROFILE on Windows: the fixture HOME must be the profile there too
     assert.match(text, /process\.env\.USERPROFILE = /, f);
   }
+});
+
+// ---- observation (agent-rules' observer): usage, estimates, shadow decision, machine figures, history ----
+
+const S1 = "Wed Nov 25 10:00:00 2026", S2 = "Wed Nov 25 10:00:01 2026", S3 = "Wed Nov 25 10:00:02 2026", SO = "Wed Nov 25 09:00:00 2026";
+const runRootOf = p => path.dirname(p.dir);
+const observerFile = (p, doc) => fs.writeFileSync(path.join(runRootOf(p), "test-slot.observer.json"), typeof doc === "string" ? doc : JSON.stringify(doc));
+const historyFile = p => path.join(runRootOf(p), "test-slot.history.jsonl");
+/** A sample of observer 900 for the queue of `observed()`: 100 runs, 300 is the head (queued first), 200 waits. */
+function sample(over = {}) {
+  return {
+    v: 1, pid: 900, pstart: SO, at: 1000, dt: 5, cost: { ticks: 3, cpu_s: 0.1 },
+    host: { ncpu: 14, idle_cores: 9.5, pressure: 2, avail_mb: 3000, swapout_pages_s: 0, swapin_pages_s: 12.5 },
+    vm: { n: 2, cpu_pct: 140.5, mem_mb: 1400.2, mem_low: false },
+    runs: [{ pid: 100, pstart: S1, tree: { n: 3, cpu_pct: 210.5, mem_mb: 812.4, rss_mb: 300.1, mem_low: false }, peak: { cpu_pct: 260, mem_mb: 900.5, samples: 7, mem_low: false }, partial: false, key: "KEYSEED", repo_id: "REPOSEED", heads: { ids: { "300:IDSEED": true } } }],
+    pending: [{ pid: 55, pstart: "PENDINGSEED" }],
+    waiters: [{ pid: 200, pstart: S2, est_state: "measured", est_mb: 600, est_cores: 2.2, est_s: 40, est_n: 5 }, { pid: 300, pstart: S3, est_state: "unmeasured", est_mb: null, est_cores: null, est_s: null, est_n: null }],
+    shadow: { pid: 300, pstart: S3, incumbent: { pid: 100, pstart: S1 }, passed: false, reason: "memory" },
+    ...over,
+  };
+}
+const ROWS = [{ pid: 100, ppid: 1, stat: "S", lstart: S1 }, { pid: 200, ppid: 1, stat: "S", lstart: S2 }, { pid: 300, ppid: 1, stat: "S", lstart: S3 }, { pid: 900, ppid: 1, stat: "SN", lstart: SO }];
+function observed({ doc = sample(), rows = ROWS, now = 1003, records = true } = {}) {
+  const p = provider();
+  if (records) {
+    record(p, { pid: 100, pstart: S1, state: "running", queued_at: 30, running_at: 35, payload: 101 });
+    record(p, { pid: 200, pstart: S2, state: "waiting", queued_at: 50 });
+    record(p, { pid: 300, pstart: S3, state: "waiting", queued_at: 40 });
+  }
+  if (doc !== null) observerFile(p, doc);
+  let ps = 0;
+  const out = readTests({ paths: p, processRows: () => (ps++, rows), step: () => null, now });
+  return { out, ps, p, run: pid => out.runs.find(r => r.pid === pid) };
+}
+
+test("observation: a fresh sample gives usage, estimates, the head's decision and machine figures", () => {
+  const { out, run } = observed();
+  assert.equal(out.observer, "running");
+  assert.deepEqual(run(100).usage, { at: 1000, tree: { n: 3, cpuPct: 210.5, memMb: 812.4, rssMb: 300.1, memLow: false }, peak: { cpuPct: 260, memMb: 900.5, samples: 7, memLow: false }, partial: false });
+  assert.deepEqual(run(200).est, { state: "measured", mb: 600, cores: 2.2, seconds: 40, n: 5 });
+  assert.deepEqual(run(300).est, { state: "unmeasured", mb: null, cores: null, seconds: null, n: null });
+  assert.deepEqual(run(300).shadow, { passed: false, reason: "memory" }, "the head is the waiter queued first");
+  assert.equal("shadow" in run(200), false);
+  assert.deepEqual(out.host, { ncpu: 14, idleCores: 9.5, pressure: 2, availMb: 3000, swapoutPagesS: 0, swapinPagesS: 12.5 });
+  assert.deepEqual(out.vm, { n: 2, cpuPct: 140.5, memMb: 1400.2, memLow: false });
+  assert.deepEqual(out.history, []);
+  // other numbers give other figures; a real zero stays zero, a missing or bad figure is null, never 0
+  const b = observed({ doc: sample({ runs: [{ pid: 100, pstart: S1, tree: { n: 1, cpu_pct: 0, mem_mb: 5.5, rss_mb: -1, mem_low: true }, peak: { cpu_pct: "9", mem_mb: Infinity, samples: 1 }, partial: true }], host: { ncpu: 8, idle_cores: null, pressure: 1, avail_mb: "x" } }) });
+  assert.deepEqual(b.run(100).usage, { at: 1000, tree: { n: 1, cpuPct: 0, memMb: 5.5, rssMb: null, memLow: true }, peak: { cpuPct: null, memMb: null, samples: 1, memLow: false }, partial: true });
+  assert.deepEqual(b.out.host, { ncpu: 8, idleCores: null, pressure: 1, availMb: null, swapoutPagesS: null, swapinPagesS: null });
+  const c = observed({ doc: sample({ runs: [{ pid: 100, pstart: S1, tree: null, peak: { cpu_pct: 1, mem_mb: 2, samples: 3 } }] }) });
+  assert.equal(c.run(100).usage.tree, null, "a tick without a tree stays missing");
+});
+
+test("observation: figures are joined by pid and start time, never by pid alone", () => {
+  const a = observed({ doc: sample({ runs: [{ ...sample().runs[0], pstart: "Wed Nov 25 08:00:00 2026" }] }) });
+  assert.equal(a.run(100).usage, null);
+  assert.equal("shadow" in a.run(300), true, "the decision names its incumbent itself");
+  const b = observed({ doc: sample({ waiters: [{ ...sample().waiters[0], pstart: "x" }] }) });
+  assert.equal(b.run(200).est, null);
+  const c = observed({ doc: sample({ waiters: [{ ...sample().waiters[0], est_state: "certain" }] }) });
+  assert.equal(c.run(200).est, null, "an unknown estimate state is not passed on");
+  const d = observed({ doc: sample({ shadow: { ...sample().shadow, pstart: "x" } }) });
+  assert.equal(d.out.runs.some(r => "shadow" in r), false);
+});
+
+test("observation: one validity decision for the sample: fresh, expired or unusable", () => {
+  const live = o => ({ usage: o.run(100).usage, est: o.run(200).est, shadow: o.out.runs.some(r => "shadow" in r), host: o.out.host, vm: o.out.vm, observer: o.out.observer });
+  const stale = { usage: { stale: true }, est: null, shadow: false, host: null, vm: null, observer: "absent" };
+  const none = { ...stale, usage: null };
+  assert.deepEqual(live(observed({ now: 1016 })), stale, "16 s old: expired");
+  assert.equal(observed({ now: 1015 }).out.observer, "running", "15 s old: fresh");
+  assert.equal(observed({ now: 995 }).out.observer, "running", "5 s ahead: fresh");
+  assert.deepEqual(live(observed({ now: 994 })), none, "6 s ahead: unusable");
+  assert.deepEqual(live(observed({ doc: null })), none, "no file");
+  assert.deepEqual(live(observed({ doc: "{half" })), none, "malformed");
+  assert.deepEqual(live(observed({ doc: sample({ v: 2 }) })), none, "another version");
+  assert.deepEqual(live(observed({ rows: ROWS.slice(0, 3) })), none, "the observer's pid is not running");
+  assert.deepEqual(live(observed({ rows: [...ROWS.slice(0, 3), { pid: 900, ppid: 1, stat: "S", lstart: S1 }] })), none, "its pid belongs to another process");
+  // identity is rejected even for an old sample: not "stale data of the right observer"
+  assert.deepEqual(live(observed({ now: 1016, rows: ROWS.slice(0, 3) })), none);
+});
+
+test("observation: an empty queue starts no ps; freshness alone says whether the observer runs", () => {
+  for (const [now, want] of [[994, "absent"], [995, "running"], [1015, "running"], [1016, "absent"]]) {
+    const { out, ps, p } = observed({ records: false, now });
+    fs.writeFileSync(historyFile(p), "");
+    assert.equal(ps, 0, "no process table for an empty queue");
+    assert.equal(out.observer, want, `age ${now - 1000}`);
+    assert.deepEqual(out.runs, []);
+    assert.deepEqual(out.history, [], "history does not depend on the observer");
+  }
+  assert.equal(observed({ records: false, doc: null }).out.observer, "absent");
+});
+
+test("observation: a decision is attached only to the pair it was computed for", () => {
+  const forHead = pid => ({ ...sample().shadow, pid, pstart: pid === 200 ? S2 : S3, passed: true, reason: "passed" });
+  const has = o => o.out.runs.filter(r => "shadow" in r).map(r => r.pid);
+  assert.deepEqual(has(observed({ doc: sample({ shadow: forHead(200) }) })), [], "200 is not the first eligible waiter");
+  // an older stopped waiter does not outrank the sampled head, and is head again when continued
+  const stopped = observed({ doc: sample({ shadow: forHead(200) }), rows: ROWS.map(r => (r.pid === 300 ? { ...r, stat: "T" } : r)) });
+  assert.deepEqual(has(stopped), [200]);
+  assert.equal(stopped.run(300).stopped, true);
+  const zombieWaiter = observed({ doc: sample({ shadow: forHead(200) }), rows: ROWS.map(r => (r.pid === 300 ? { ...r, stat: "Z" } : r)) });
+  assert.deepEqual(has(zombieWaiter), [200]);
+  assert.equal(zombieWaiter.run(300).exited, true);
+  // the incumbent of the decision must still be a running row that has not exited
+  const gone = observed({ doc: sample({ shadow: forHead(300) }) });
+  fs.unlinkSync(path.join(gone.p.dir, "100.json"));
+  assert.deepEqual(readTests({ paths: gone.p, processRows: () => ROWS, step: () => null, now: 1003 }).runs.filter(r => "shadow" in r), [], "its incumbent left the queue");
+  assert.deepEqual(has(observed({ doc: sample({ shadow: { ...forHead(300), incumbent: { pid: 100, pstart: "x" } } }) })), [], "another run holds that pid now");
+  const holderT = observed({ doc: sample({ shadow: forHead(300) }), rows: ROWS.map(r => (r.pid === 100 ? { ...r, stat: "T" } : r)) });
+  assert.deepEqual(has(holderT), [300], "a stopped holder still holds the slot");
+  assert.equal(holderT.run(100).usage.peak.memMb, 900.5);
+});
+
+test("observation: a holder that exited gets no usage and is nobody's incumbent, whatever the sample says", () => {
+  const withSuccessor = (now, stat) => {
+    const p = provider();
+    record(p, { pid: 100, pstart: S1, state: "running", queued_at: 30, running_at: 35, payload: 101 });
+    record(p, { pid: 150, pstart: S2, state: "running", queued_at: 31, running_at: 60, payload: 151 });
+    record(p, { pid: 300, pstart: S3, state: "waiting", queued_at: 40 });
+    observerFile(p, sample({ runs: [sample().runs[0], { ...sample().runs[0], pid: 150, pstart: S2 }], shadow: { ...sample().shadow, passed: true, reason: "passed" } }));
+    const rows = [{ pid: 100, ppid: 1, stat, lstart: S1 }, { pid: 150, ppid: 1, stat: "S", lstart: S2 }, { pid: 300, ppid: 1, stat: "S", lstart: S3 }, { pid: 900, ppid: 1, stat: "S", lstart: SO }];
+    const out = readTests({ paths: p, processRows: () => rows, step: () => null, now });
+    return pid => out.runs.find(r => r.pid === pid);
+  };
+  let run = withSuccessor(1003, "Z");
+  assert.equal(run(100).exited, true);
+  assert.equal(run(100).usage, null);
+  assert.equal(run(150).usage.peak.samples, 7);
+  assert.equal("shadow" in run(300), false, "the decision was computed against the former holder");
+  run = withSuccessor(1003, "T");
+  assert.equal("shadow" in run(300), true);
+  assert.notEqual(run(100).usage, null);
+  // expired sample: the exited holder has no usage at all, its live successor's is stale
+  run = withSuccessor(1030, "Z");
+  assert.equal(run(100).usage, null);
+  assert.deepEqual(run(150).usage, { stale: true });
+});
+
+test("observation: waiting only: estimate and machine figures without a running record, and no decision", () => {
+  const p = provider();
+  record(p, { pid: 200, pstart: S2, state: "waiting", queued_at: 50 });
+  observerFile(p, sample({ runs: [], shadow: null }));
+  const out = readTests({ paths: p, processRows: () => ROWS, step: () => null, now: 1003 });
+  assert.equal(out.runs[0].est.state, "measured");
+  assert.equal(out.host.availMb, 3000);
+  assert.equal("shadow" in out.runs[0], false);
+  // a stale pass for a pair that no longer exists is not shown on a waiting-only queue either
+  observerFile(p, sample({ runs: [], shadow: { pid: 200, pstart: S2, incumbent: { pid: 100, pstart: S1 }, passed: true, reason: "passed" } }));
+  assert.equal("shadow" in readTests({ paths: p, processRows: () => ROWS, step: () => null, now: 1003 }).runs[0], false);
+});
+
+test("observation: an unreadable queue still reports history and no live figure", () => {
+  const p = provider();
+  record(p, { pid: 100, pstart: S1, state: "running", queued_at: 30, running_at: 35, payload: 101 });
+  observerFile(p, sample());
+  const out = readTests({ paths: p, processRows: () => null, step: () => null, now: 1003 });
+  assert.deepEqual(out, { available: true, error: true, runs: [], observer: "absent", host: null, vm: null, history: [] });
+  assert.deepEqual(readTests({ paths: provider({ dir: false }), processRows: () => ROWS }), { available: false });
+});
+
+const hline = (i, over = {}) => JSON.stringify({ v: 1, id: `IDSEED-${i}`, key: "KEYSEED", repo_id: "REPOSEED", started_at: i * 10, ended_at: i * 10 + 5, repo: "app", worktree: "wt", label: "vitest", queued_at: i * 10 - 2, wait_s: 2, dur_s: 5, exit: 0, est_mb: 512, est_cores: 2, peak: { mem_mb: 300.5 + i, cpu_pct: 120, samples: 3, mem_low: false }, partial: false, vm: null, overlapped: false, heads_total: 1, heads_passed: 1, heads_exact: true, shadow: [{ repo: "DETAILSEED", label: "x", passed: true, reason: "passed", samples: 2 }], shadow_truncated: false, ...over });
+
+test("history: the newest 20 runs, newest first, validated, without keys, ids or shadow detail", () => {
+  const p = provider();
+  assert.deepEqual(readHistory(p), [], "no file: an empty history");
+  const lines = [JSON.stringify({ v: 1, snapshot: true, lines: 30, overflow: false, state: { KEYSEED: { budget_mb: 900, fits: 1 } } })];
+  for (let i = 1; i <= 30; i++) lines.push(hline(i));
+  lines.push("{torn", JSON.stringify({ v: 2, ended_at: 9999 }), JSON.stringify({ v: 1, ended_at: "soon" }));
+  lines.push(hline(31, { exit: 17, partial: true, est_mb: null, peak: null, heads_total: 200, heads_passed: 3, heads_exact: false, shadow: Array(20).fill({ repo: "DETAILSEED" }) }));
+  lines.push(hline(32, { peak: { mem_mb: 700, cpu_pct: null, samples: 2, mem_low: true }, wait_s: -1, heads_total: 21, heads_passed: 1 }));
+  fs.writeFileSync(historyFile(p), lines.join("\n") + "\n");
+  const h = readHistory(p);
+  assert.equal(h.length, 20);
+  assert.deepEqual(h.map(r => r.endedAt), Array.from({ length: 20 }, (_, i) => (32 - i) * 10 + 5));
+  assert.deepEqual(h[0], { endedAt: 325, repo: "app", worktree: "wt", label: "vitest", waitS: null, durS: 5, exit: 0, peakMemMb: 700, peakCpuPct: null, memLow: true, estMb: 512, partial: false, heads: 21, headsPassed: 1, headsExact: true });
+  assert.deepEqual(h[1], { endedAt: 315, repo: "app", worktree: "wt", label: "vitest", waitS: 2, durS: 5, exit: 17, peakMemMb: null, peakCpuPct: null, memLow: false, estMb: null, partial: true, heads: 200, headsPassed: 3, headsExact: false });
+  // through the whole reader, with a live queue: nothing private reaches the payload
+  record(p, { pid: 100, pstart: S1, state: "running", queued_at: 30, running_at: 35, payload: 101 });
+  observerFile(p, sample());
+  const text = JSON.stringify(readTests({ paths: p, processRows: () => ROWS, step: () => null, now: 1003 }));
+  for (const seed of ["KEYSEED", "REPOSEED", "IDSEED", "DETAILSEED", "PENDINGSEED"]) assert.equal(text.includes(seed), false, seed);
+  assert.equal(JSON.parse(text).history.length, 20);
+});
+
+test("history: runs that ended in the same second keep the order they were written in", () => {
+  const p = provider();
+  fs.writeFileSync(historyFile(p), [hline(1, { label: "first" }), hline(1, { label: "second" }), hline(1, { label: "third" })].join("\n") + "\n");
+  assert.deepEqual(readHistory(p).map(r => r.label), ["third", "second", "first"]);
+});
+
+test("history: read whole or not at all; an unchanged file is read once", () => {
+  const p = provider();
+  fs.writeFileSync(historyFile(p), hline(1) + "\n");
+  let reads = 0;
+  const spy = (...a) => (reads++, fs.readFileSync(...a));
+  assert.equal(readHistory(p, spy).length, 1);
+  assert.equal(readHistory(p, spy).length, 1);
+  assert.equal(reads, 1, "size and mtime unchanged: served from memory");
+  fs.appendFileSync(historyFile(p), hline(2) + "\n");
+  assert.equal(readHistory(p, spy).length, 2);
+  assert.equal(reads, 2, "re-read after an append");
+  fs.writeFileSync(historyFile(p), "\n".repeat(2 * 1024 * 1024 + 1));
+  assert.equal(readHistory(p, spy), null, "larger than the observer ever writes: unknown");
+  assert.equal(reads, 2, "and not read at all");
+  fs.rmSync(historyFile(p));
+  fs.mkdirSync(historyFile(p));
+  assert.equal(readHistory(p), null, "not a regular file");
 });
