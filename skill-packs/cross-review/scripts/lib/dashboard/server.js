@@ -296,7 +296,6 @@ export function createListWatcher({ root, now = () => Math.floor(Date.now() / 10
     return out;
   }
 
-  const PLAN_ORDER = { progress: 0, review: 0, ready: 1, draft: 2, done: 3, doc: 4 };
 
   function buildPlans(wsMap, names, sessionsByWs) {
     const all = [...sessionsByWs.values()].flatMap(m => [...m.values()]);
@@ -348,7 +347,8 @@ export function createListWatcher({ root, now = () => Math.floor(Date.now() / 10
       });
     }
     for (const file of planCache.keys()) if (!seen.has(file)) planCache.delete(file);
-    plans.sort((a, b) => PLAN_ORDER[a.state] - PLAN_ORDER[b.state] || b.changedAt - a.changedAt || a.ws.localeCompare(b.ws) || a.file.localeCompare(b.file));
+    // the plan changed last comes first, whatever its state
+    plans.sort((a, b) => b.changedAt - a.changedAt || a.ws.localeCompare(b.ws) || a.file.localeCompare(b.file));
     planIndex = index;
     return plans;
   }
