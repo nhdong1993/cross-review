@@ -60,6 +60,13 @@ body { padding-bottom: var(--foot); }
 #updates-block { display: none; } #updates-block.on { display: block; }
 #testing-block { display: none; } #testing-block.on { display: block; }
 #test-runs td.run .line2 { overflow-wrap: anywhere; }
+#test-history td.run .line2 { overflow-wrap: anywhere; }
+#tests .strip { display: flex; flex-wrap: wrap; gap: 4px 22px; margin: 10px 0 2px; font-size: 13px; color: var(--soft); }
+#tests .strip b { font-weight: 500; color: var(--muted); margin-right: 4px; }
+#tests .strip.soft { color: var(--muted); }
+#tests .note { margin: 10px 0 2px; font-size: 13px; color: var(--soft); }
+#tests th.w-exit { width: 56px; }
+#tests .bad { color: var(--red); }
 @media (max-width: 600px) {
   #tests th.w-state, #tests th.w-for { width: auto; }
   /* phones: the tabs show their icons only (the label stays their accessible name), so all four fit */

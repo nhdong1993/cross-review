@@ -334,18 +334,71 @@ function filteredHistory() {
 
 const renderHistory = () => fitPage(hist, filteredHistory());
 
+// What agent-rules' observer measured. A missing figure is "—", never 0; memory is the physical footprint.
+const DASH = "—";
+const memText = mb => (mb === null || mb === undefined ? DASH : mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`);
+const coresText = pct => (pct === null || pct === undefined ? DASH : `${(pct / 100).toFixed(1)} cores`);
+const SHADOW_WAIT = {
+  incomplete: "not enough figures yet", incumbent_unmeasured: "the running task has no measured budget",
+  candidate_unmeasured: "this command has no measured budget", same_repo: "same repository as the running task",
+  pressure: "memory pressure", swapout: "the machine is swapping out", cpu: "CPU", memory: "memory",
+};
+const SHADOW_TITLE = "An observation only: nothing is admitted, the queue still runs one task at a time. Whether these repositories may run together is not known.";
+/** The resource line of a run: what it uses (running) or what it is expected to need (waiting). */
+function usageLine(r) {
+  if (r.state === "running") {
+    if (r.exited) return "ended";
+    const u = r.usage;
+    if (!u) return "";
+    if (u.stale) return "figures are stale";
+    const t = u.tree, p = u.peak || {};
+    // a figure that could only be read in part is a lower bound, and says so
+    const mem = (mb, low) => (mb === null || mb === undefined ? DASH : `${low ? "at least " : ""}${memText(mb)}`);
+    return `CPU ${coresText(t ? t.cpuPct : null)} · memory ${mem(t ? t.memMb : null, t && t.memLow)} now, ${mem(p.memMb, p.memLow)} peak${u.partial ? " · partial" : ""}`;
+  }
+  const e = r.est;
+  const need = !e ? "" : e.state === "measured" ? `≈ ${memText(e.mb)} · ${e.cores === null ? DASH : e.cores.toFixed(1)} cores · ${e.seconds === null ? DASH : clock(e.seconds)} (${e.n} runs)`
+    : e.state === "overrun" ? "over its budget" : e.state === "unknown" ? DASH : "not measured yet";
+  const sh = r.shadow;
+  const dec = !sh ? "" : `<span title="${esc(SHADOW_TITLE)}">${esc(sh.passed ? "resource checks passed (if both repos were eligible)" : `resource checks: waiting for ${SHADOW_WAIT[sh.reason] || sh.reason}`)}</span>`;
+  return [esc(need), r.stopped ? "stopped" : "", dec].filter(Boolean).join(" · ");
+}
+
+function hostStrip(t) {
+  if (t.observer !== "running") return "";
+  const h = t.host, v = t.vm;
+  if (!h) return `<div class="strip soft">Machine figures appear while a test runs.</div>`;
+  const pressure = { 1: "Normal", 2: "Warning", 4: "Critical" }[h.pressure] || DASH;
+  const cell = (k, val) => `<span><b>${esc(k)}</b> ${esc(val)}</span>`;
+  return `<div class="strip">${[
+    cell("Memory headroom", `≈ ${memText(h.availMb)}`), cell("Pressure", pressure),
+    cell("Idle cores", h.idleCores === null ? DASH : `${h.idleCores.toFixed(1)} of ${h.ncpu ?? DASH}`),
+    cell("Swap-out", h.swapoutPagesS === null ? DASH : `${Math.round(h.swapoutPagesS)} pages/s`),
+    v && v.n ? `<span title="All VM work on this machine, not this run"><b>VM processes</b> ${v.n} · ${esc(coresText(v.cpuPct))} · ${esc((v.memLow ? "at least " : "") + memText(v.memMb))} (all VM work, not this run)</span>` : "",
+  ].join("")}</div>`;
+}
+
+function testHistoryRow(h) {
+  const where = h.repo ? `${h.repo} · ${h.worktree}` : h.worktree;
+  const heads = h.heads ? ` · ${h.headsExact ? "" : "at least "}${h.headsPassed} of ${h.headsExact ? "" : "at least "}${h.heads} waiting heads passed resource checks` : "";
+  const line2 = `${where} · waited ${h.waitS === null ? DASH : clock(h.waitS)} · ran ${h.durS === null ? DASH : clock(h.durS)} · peak ${h.memLow ? "at least " : ""}${memText(h.peakMemMb)}, ${coresText(h.peakCpuPct)}${h.partial ? " · partial" : ""}${heads}`;
+  const exit = h.exit === null ? DASH : h.exit === 0 ? "0" : `<span class="bad">${h.exit}</span>`;
+  return `<tr><td class="run">${esc(h.label)}<div class="line2">${esc(line2)}</div></td><td class="num soft">${esc(changed(h.endedAt))}</td><td class="num mono">${exit}</td></tr>`;
+}
+
 /** A test-slot run: Waited stops at the moment it got the slot; only the cells that still count carry data-since. */
 function testRow(r) {
   const running = r.state === "running";
   const where = r.repo ? `${r.repo} · ${r.worktree}` : r.worktree;
   const step = r.step ? [r.step.program, r.step.script].filter(Boolean).join(" ") : "";
   const line2 = [where, step].filter(Boolean).join(" · ");
+  const line3 = usageLine(r);
   const waited = running
     ? `<td class="num mono">${clock(Math.max(0, r.runningAt - r.queuedAt))}</td>`
     : `<td class="num mono" data-since="${Number(r.queuedAt) || 0}">${clock(nowS() - r.queuedAt)}</td>`;
   const ran = running ? `<td class="num mono" data-since="${Number(r.runningAt) || 0}">${clock(nowS() - r.runningAt)}</td>` : `<td class="num soft">—</td>`;
   return `<tr><td>${st(running ? "running" : "waiting", running ? "running" : "waiting")}</td>
-    <td class="run">${esc(r.label)}${line2 ? `<div class="line2">${esc(line2)}</div>` : ""}</td>${waited}${ran}</tr>`;
+    <td class="run">${esc(r.label)}${line2 ? `<div class="line2">${esc(line2)}</div>` : ""}${line3 ? `<div class="line2 usage">${r.state === "running" ? esc(line3) : line3}</div>` : ""}</td>${waited}${ran}</tr>`;
 }
 
 /** The Tests tab: its link shows only where test-slot is set up (run/test-slot.d), so the page is the same as
@@ -356,6 +409,12 @@ function renderTests() {
   const empty = text => `<tr class="empty"><td colspan="4"><div class="empty-state">${text}</div></td></tr>`;
   $("#test-runs").innerHTML = !t.available ? empty("test-slot is not set up on this computer (no ~/.agents/run/test-slot.d).")
     : t.error ? empty("Test queue unreadable.") : t.runs.length ? t.runs.map(testRow).join("") : empty("No active (instrumented) test runs.");
+  const on = t.available === true && !t.error;
+  $("#test-observer").hidden = !(on && t.observer !== "running");
+  $("#test-host").innerHTML = on ? hostStrip(t) : "";
+  const h = !on || t.history === undefined ? [] : t.history; // null: unreadable; absent: no observer data at all
+  $("#test-history-block").hidden = !(on && (h === null || h.length));
+  $("#test-history").innerHTML = h === null ? `<tr class="empty"><td colspan="3"><div class="empty-state">Run history unreadable (${DASH}).</div></td></tr>` : (h || []).map(testHistoryRow).join("");
 }
 
 function renderSessions() {

@@ -1253,21 +1253,21 @@ test("plans: a workspace with only plans is listed with its plan", async () => {
 test("plans in the list: five states, review while a review-plan session is active, fields and order", async () => {
   const { d, fx, pl, root } = await servePlans();
   try {
-    // within a group, the newest change first
+    // the plan changed last comes first, whatever its state
     const t = Date.now() / 1000;
-    fs.utimesSync(pl.files.draft, t - 500, t - 500);
-    fs.utimesSync(pl.files.pending, t - 100, t - 100);
+    const age = { doc: 100, done: 200, pending: 300, progress: 400, ready: 500, draft: 600 };
+    for (const [k, s] of Object.entries(age)) fs.utimesSync(pl.files[k], t - s, t - s);
     let p = await getJson(d, "/api/sessions");
     const key = it => `${it.ws}/${it.file}`;
     assert.deepEqual(p.plans.map(key), [
+      "harbor-app/sync notes.md",
+      "inkwell/search-by-date-plan.md",
+      "atlas-notes/kế-hoạch.md",
       "harbor-app/export-formats-plan.md",
       "services/orchard-api/shared-notebooks-plan.md",
-      "atlas-notes/kế-hoạch.md",
       "harbor-app/sync-offline-plan.md",
-      "inkwell/search-by-date-plan.md",
-      "harbor-app/sync notes.md",
     ]);
-    assert.deepEqual(p.plans.map(it => it.state), ["progress", "ready", "draft", "draft", "done", "doc"]);
+    assert.deepEqual(p.plans.map(it => it.state), ["doc", "done", "draft", "progress", "ready", "draft"]);
     const ex = planOf(p, "harbor-app", "export-formats-plan.md");
     assert.deepEqual(ex.progress, { phasesDone: 2, phasesTotal: 5, acsMet: 9, acsTotal: 16, current: 3 });
     assert.deepEqual(ex.bar, [1, 1, 0.5, 0, 0]);
@@ -1294,7 +1294,7 @@ test("plans in the list: five states, review while a review-plan session is acti
     let it = planOf(p, "atlas-notes", "kế-hoạch.md");
     assert.equal(it.state, "review");
     assert.deepEqual(it.reviewSession, { id: "review-plan-20261016-001", round: 1 });
-    assert.equal(p.plans[1].file, "kế-hoạch.md", "review sorts with progress");
+    assert.equal(p.plans[2].file, "kế-hoạch.md", "a review does not move a plan: the order is by last change only");
     // the session ends: the plan's own state again
     reviewPlanOn(fx.workspaces.orchard, "review-plan-20261016-001", path.join(root, "atlas-link", ".cross-review", "plans", "kế-hoạch.md"), { running: false, meta: "REVISE" });
     p = await getJson(d, "/api/sessions");
